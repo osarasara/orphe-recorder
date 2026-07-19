@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orphe Recorder v0.1 — 接続テスト</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  .sub { color: #888; font-size: .85rem; margin: 0 0 16px; }
+  button { font-size: 1.1rem; padding: 14px 20px; border-radius: 12px; border: none;
+           background: #2563eb; color: #fff; width: 100%; margin-bottom: 12px; }
+  button:disabled { background: #9ca3af; }
+  #status { padding: 10px 12px; border-radius: 10px; background: rgba(128,128,128,.15);
+            font-size: .95rem; margin-bottom: 16px; }
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+  .card { background: rgba(128,128,128,.12); border-radius: 12px; padding: 12px; }
+  .card .label { font-size: .75rem; color: #888; }
+  .card .val { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .val.warn { color: #dc2626; }
+  canvas { width: 100%; height: 150px; background: rgba(128,128,128,.10); border-radius: 12px; }
+  .hint { font-size: .8rem; color: #888; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h1>Orphe Recorder v0.1</h1>
+  <p class="sub">接続テスト版：片足の gyro_x が 200Hz で流れて、レート・欠損が見えればOK。</p>
+
+  <button id="connect">シューズを接続</button>
+  <div id="status">未接続</div>
+
+  <div class="metrics">
+    <div class="card"><div class="label">gyro_x (°/s)</div><div class="val" id="gx">–</div></div>
+    <div class="card"><div class="label">サンプルレート</div><div class="val" id="rate">– <span style="font-size:.9rem">Hz</span></div></div>
+    <div class="card"><div class="label">受信サンプル数</div><div class="val" id="count">0</div></div>
+    <div class="card"><div class="label">欠損イベント</div><div class="val" id="lost">0</div></div>
+  </div>
+
+  <canvas id="wave" width="720" height="300"></canvas>
+  <div class="hint">
+    足首をゆっくり上下（底屈背屈）すると波が動くはず。レートが 180〜200 近辺で安定していれば良好。
+    大きく下回る／欠損が増え続けるなら、端末の位置や距離を調整。
+  </div>
+
+  <!-- ORPHE 公式ライブラリ（CDN） -->
+  <script src="https://cdn.jsdelivr.net/gh/Orphe-OSS/ORPHE-CORE.js/js/ORPHE-CORE.js"></script>
+  <script>
+    let core;
+    let count = 0;
+    let lost = 0;
+    let lastGx = 0;
+    let rateWindow = [];          // 直近1秒の受信時刻
+    const buf = [];               // 波形用 gyro_x 履歴
+    const BUF_MAX = 720;
+
+    window.onload = function () {
+      core = new Orphe(0);        // 端末ID 0（片足）。両足版では 0/1 を使う
+      core.setup();
+
+      // 1サンプルごとに呼ばれる（200Hzモードなら1パケット4サンプル→まとめて4回）
+      core.gotGyro = function (gyro) {
+        const t = performance.now();
+        count++;
+        lastGx = gyro.x;
+        rateWindow.push(t);
+        while (rateWindow.length && rateWindow[0] < t - 1000) rateWindow.shift();
+        buf.push(gyro.x);
+        if (buf.length > BUF_MAX) buf.shift();
+      };
+
+      // 欠損検出（ライブラリ標準）
+      core.lostData = function (num, num_prev) {
+        lost++;
+        console.warn(`欠損: ${num_prev} → ${num}`);
+      };
+
+      requestAnimationFrame(render);
+    };
+
+    document.getElementById('connect').onclick = async function () {
+      const btn = this;
+      btn.disabled = true;
+      setStatus('接続中… ダイアログでシューズを選んでください');
+      try {
+        await core.begin('SENSOR_VALUES');   // 200Hz 生センサーモード
+        setStatus('接続済み ✓ データ受信中');
+      } catch (e) {
+        setStatus('接続失敗: ' + (e && e.message ? e.message : e));
+        console.error(e);
+        btn.disabled = false;
+      }
+    };
+
+    function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+    const ctx = document.getElementById('wave').getContext('2d');
+    function render() {
+      // メトリクス更新（描画フレームごと＝約60fps。DOMを毎サンプル触らない）
+      document.getElementById('gx').textContent = lastGx.toFixed(1);
+      document.getElementById('count').textContent = count;
+      const rate = rateWindow.length;
+      const rateEl = document.getElementById('rate');
+      rateEl.innerHTML = rate + ' <span style="font-size:.9rem">Hz</span>';
+      rateEl.className = 'val' + (count > 0 && rate < 150 ? ' warn' : '');
+      const lostEl = document.getElementById('lost');
+      lostEl.textContent = lost;
+      lostEl.className = 'val' + (lost > 0 ? ' warn' : '');
+
+      // 波形描画（gyro_x を自動スケールで）
+      const w = ctx.canvas.width, h = ctx.canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      if (buf.length > 1) {
+        let mx = 1;
+        for (const v of buf) mx = Math.max(mx, Math.abs(v));
+        ctx.strokeStyle = 'rgba(128,128,128,.4)';
+        ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+        ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2; ctx.beginPath();
+        for (let i = 0; i < buf.length; i++) {
+          const x = (i / (BUF_MAX - 1)) * w;
+          const y = h/2 - (buf[i] / mx) * (h/2 - 8);
+          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        ctx.stroke();
+      }
+      requestAnimationFrame(render);
+    }
+  </script>
+</body>
+</html>
