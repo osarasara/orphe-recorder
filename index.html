@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.2 — 接続テスト</title>
+<title>Orphe Recorder v0.3 — 走行データ収録（両足）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -11,38 +11,70 @@
   .sub { color: #888; font-size: .85rem; margin: 0 0 12px; }
   #diag { font-family: ui-monospace, monospace; font-size: .8rem; white-space: pre;
           background: rgba(128,128,128,.12); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
-  button { font-size: 1.1rem; padding: 14px 20px; border-radius: 12px; border: none;
-           background: #2563eb; color: #fff; width: 100%; margin-bottom: 12px; }
+  button { font-size: 1.05rem; padding: 13px 18px; border-radius: 12px; border: none;
+           background: #2563eb; color: #fff; width: 100%; margin-bottom: 8px; }
   button:disabled { background: #9ca3af; }
-  #status { padding: 10px 12px; border-radius: 10px; background: rgba(128,128,128,.15);
-            font-size: .95rem; margin-bottom: 12px; }
+  button.rec { background: #16a34a; }
+  button.stop { background: #dc2626; }
+  button.ghost { background: rgba(128,128,128,.2); color: inherit; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  label.lbl { font-size: .8rem; color: #888; display:block; margin: 4px 0 2px; }
+  input[type=text] { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 10px 12px;
+           border-radius: 10px; border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; margin-bottom: 10px; }
+  .foot { border: 1px solid rgba(128,128,128,.25); border-radius: 12px; padding: 10px; }
+  .foot h2 { font-size: .95rem; margin: 0 0 6px; }
+  .foot .st { font-size: .8rem; color:#888; margin-bottom: 8px; min-height: 1.2em; }
+  .foot.on { border-color: #16a34a; }
+  .m { display:flex; justify-content:space-between; font-variant-numeric: tabular-nums; font-size:.85rem; }
+  .m b { font-weight:700; }
+  .warn { color:#dc2626; }
+  #recbar { margin: 14px 0 6px; }
+  #elapsed { text-align:center; font-size:1.6rem; font-weight:700; font-variant-numeric: tabular-nums; margin: 6px 0; }
+  #downloads { margin-top: 12px; }
+  #downloads a { display:block; text-align:center; text-decoration:none; }
+  #summary { font-family: ui-monospace, monospace; font-size:.78rem; white-space:pre-wrap;
+             background: rgba(128,128,128,.12); border-radius:10px; padding:10px 12px; margin-top:10px; }
   #log { font-family: ui-monospace, monospace; font-size: .75rem; white-space: pre-wrap;
-         color: #dc2626; min-height: 1.2em; margin-bottom: 12px; }
-  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-  .card { background: rgba(128,128,128,.12); border-radius: 12px; padding: 12px; }
-  .card .label { font-size: .75rem; color: #888; }
-  .card .val { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .val.warn { color: #dc2626; }
-  canvas { width: 100%; height: 150px; background: rgba(128,128,128,.10); border-radius: 12px; }
+         color: #dc2626; min-height: 1.2em; margin-top: 10px; }
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.2</h1>
-  <p class="sub">接続テスト版。まず下の診断4行を確認 → 「接続」。</p>
+  <h1>Orphe Recorder v0.3</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録。</p>
 
   <div id="diag">診断中…</div>
 
-  <button id="connect">シューズを接続</button>
-  <div id="status">未接続</div>
-  <div id="log"></div>
+  <label class="lbl">ファイル名ラベル（例: run1）</label>
+  <input type="text" id="label" value="run" autocomplete="off">
 
-  <div class="metrics">
-    <div class="card"><div class="label">gyro_x (°/s)</div><div class="val" id="gx">–</div></div>
-    <div class="card"><div class="label">サンプルレート</div><div class="val" id="rate">– <span style="font-size:.9rem">Hz</span></div></div>
-    <div class="card"><div class="label">受信サンプル数</div><div class="val" id="count">0</div></div>
-    <div class="card"><div class="label">欠損イベント</div><div class="val" id="lost">0</div></div>
+  <div class="row2">
+    <div class="foot" id="footL">
+      <h2>左足 (L)</h2>
+      <div class="st" id="stL">未接続</div>
+      <button id="connL">接続 左足</button>
+      <div class="m"><span>レート</span><b id="hzL">– Hz</b></div>
+      <div class="m"><span>サンプル</span><b id="nL">0</b></div>
+      <div class="m"><span>欠損</span><b id="lostL">0</b></div>
+    </div>
+    <div class="foot" id="footR">
+      <h2>右足 (R)</h2>
+      <div class="st" id="stR">未接続</div>
+      <button id="connR">接続 右足</button>
+      <div class="m"><span>レート</span><b id="hzR">– Hz</b></div>
+      <div class="m"><span>サンプル</span><b id="nR">0</b></div>
+      <div class="m"><span>欠損</span><b id="lostR">0</b></div>
+    </div>
   </div>
-  <canvas id="wave" width="720" height="300"></canvas>
+
+  <div id="recbar">
+    <button id="rec" class="rec" disabled>● 収録開始</button>
+    <button id="stop" class="stop" disabled style="display:none">■ 収録停止</button>
+  </div>
+  <div id="elapsed"></div>
+
+  <div id="downloads"></div>
+  <pre id="summary" style="display:none"></pre>
+  <div id="log"></div>
 
   <!-- ライブラリ（同梱・CDN依存なし） -->
   <script src="js/ORPHE-CORE.js"></script>
@@ -55,9 +87,7 @@
       function el(id){ return document.getElementById(id); }
       window.__logLine = function (m) { var d = el('log'); if (d) d.textContent += m + '\n'; };
       window.addEventListener('error', function (e) { if (window.__logLine) window.__logLine('ERR: ' + e.message); });
-      var ua = navigator.userAgent;
-      var m = ua.match(/Chrome\/(\d+)/);
-      var cv = m ? m[1] : '不明';
+      var ua = navigator.userAgent, m = ua.match(/Chrome\/(\d+)/), cv = m ? m[1] : '不明';
       var L = [];
       L.push('Chrome バージョン : ' + cv + (m && parseInt(cv,10) < 80 ? '  ← 古すぎ(80未満)' : ''));
       L.push('セキュア(HTTPS)   : ' + (window.isSecureContext ? 'OK' : 'NG'));
@@ -67,76 +97,183 @@
     })();
   </script>
 
-  <!-- ② 本体（新しめの文法を使う。古Chromeでここが落ちても①の診断は残る） -->
+  <!-- ② 本体 -->
   <script>
-    let core = null, count = 0, lost = 0, lastGx = 0;
-    let rateWindow = [];
-    const buf = [], BUF_MAX = 720;
-    function setStatus(m){ document.getElementById('status').textContent = m; }
-
-    window.onload = function () {
-      try {
-        if (typeof Orphe === 'undefined') { window.__logLine('Orphe未定義：ライブラリが読めていない'); setStatus('ライブラリ読込失敗（上の診断参照）'); return; }
-        core = new Orphe(0);
-        core.setup();
-        core.gotGyro = function (gyro) {
-          const t = performance.now();
-          count++; lastGx = gyro.x;
-          rateWindow.push(t);
-          while (rateWindow.length && rateWindow[0] < t - 1000) rateWindow.shift();
-          buf.push(gyro.x); if (buf.length > BUF_MAX) buf.shift();
-        };
-        core.lostData = function () { lost++; };
-        requestAnimationFrame(render);
-      } catch (err) {
-        window.__logLine('init失敗: ' + (err && err.message ? err.message : err));
-        setStatus('初期化失敗（上のログ参照）');
-      }
+    const CSV_HEADER = 'timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,quat_x,quat_y,quat_z,quat_w';
+    // 既存データと同じスケールで残す: acc/gyro=正規化値(解析側で ×16 / ×2000)、quat=生int16、timestamp=デバイス時刻(PC時計に同期)
+    const feet = {
+      L: { key:'L', id:0, core:null, connected:false, rec:[], n:0, lost:0, rateWin:[], lastTs:0 },
+      R: { key:'R', id:1, core:null, connected:false, rec:[], n:0, lost:0, rateWin:[], lastTs:0 },
     };
+    let recording = false, recStart = 0, recEnd = 0, wakeLock = null, audioCtx = null;
+    const startBeepTs = {}, endBeepTs = {};
+    const $ = id => document.getElementById(id);
 
-    document.getElementById('connect').onclick = async function () {
-      const btn = this;
-      if (!navigator.bluetooth) { setStatus('この端末/ブラウザは Web Bluetooth 非対応'); return; }
-      if (!core) { setStatus('ライブラリ未初期化（診断/ログ参照）'); return; }
-      btn.disabled = true;
-      setStatus('接続中… ダイアログでシューズを選んでください');
+    // ---- サンプル受信（gotGyro時点で core.acc / core.quat も同一サンプル値） ----
+    function onSample(F) {
+      const c = F.core, ts = (c.gyro && c.gyro.timestamp) ? c.gyro.timestamp : Date.now();
+      F.n++; F.lastTs = ts;
+      const now = performance.now();
+      F.rateWin.push(now);
+      while (F.rateWin.length && F.rateWin[0] < now - 1000) F.rateWin.shift();
+      if (recording) {
+        const a = c.acc, g = c.gyro, q = c.quat;
+        F.rec.push(
+          ts + ',' +
+          a.x + ',' + a.y + ',' + a.z + ',' +
+          g.x + ',' + g.y + ',' + g.z + ',' +
+          Math.round(q.x*32768) + ',' + Math.round(q.y*32768) + ',' + Math.round(q.z*32768) + ',' + Math.round(q.w*32768)
+        );
+      }
+    }
+
+    async function connect(F, btn, stEl) {
+      if (!navigator.bluetooth) { stEl.textContent = 'Web Bluetooth 非対応'; return; }
+      if (typeof Orphe === 'undefined') { stEl.textContent = 'ライブラリ未ロード'; return; }
+      ensureAudio();
+      btn.disabled = true; stEl.textContent = '接続中… ダイアログでシューズを選択';
       try {
-        await core.begin('SENSOR_VALUES');
-        setStatus('接続済み ✓ データ受信中');
+        F.core = new Orphe(F.id);
+        F.core.setup();
+        F.core.gotGyro = function () { onSample(F); };
+        F.core.lostData = function () { F.lost++; };
+        // range: 既存解析に合わせ acc=16g / gyro=2000dps。useSharedBridgeは2台同時のため無効化
+        await F.core.begin('SENSOR_VALUES', { range: { acc: 16, gyro: 2000 }, useSharedBridge: false });
+        F.connected = true;
+        stEl.textContent = '接続済み ✓ 受信中';
+        $('foot'+F.key).classList.add('on');
+        btn.textContent = '再接続 ' + (F.key==='L'?'左足':'右足');
+        btn.disabled = false;
+        updateRecEnabled();
       } catch (e) {
         const msg = (e && e.message) ? e.message : String(e);
-        setStatus('接続失敗: ' + msg);
-        window.__logLine('begin失敗: ' + msg);
+        stEl.textContent = '接続失敗: ' + msg;
+        window.__logLine('begin失敗('+F.key+'): ' + msg);
         btn.disabled = false;
       }
+    }
+    $('connL').onclick = function(){ connect(feet.L, this, $('stL')); };
+    $('connR').onclick = function(){ connect(feet.R, this, $('stR')); };
+
+    function updateRecEnabled() {
+      $('rec').disabled = recording || !(feet.L.connected || feet.R.connected);
+    }
+
+    // ---- ビープ（Web Audio）----
+    function ensureAudio() {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+      } catch (e) { window.__logLine('audio初期化失敗: ' + e.message); }
+    }
+    function beep(freq, ms) {
+      if (!audioCtx) return;
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator(), g = audioCtx.createGain();
+      osc.type = 'square'; osc.frequency.value = freq || 1320;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.6, t0 + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + (ms||130)/1000);
+      osc.connect(g).connect(audioCtx.destination);
+      osc.start(t0); osc.stop(t0 + (ms||130)/1000 + 0.02);
+    }
+
+    // ---- Wake Lock ----
+    async function requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator) { wakeLock = await navigator.wakeLock.request('screen'); }
+        else window.__logLine('Wake Lock非対応: 画面が消えると収録が止まる可能性→画面ONを保って');
+      } catch (e) { window.__logLine('WakeLock失敗: ' + e.message); }
+    }
+    function releaseWakeLock() { try { if (wakeLock) { wakeLock.release(); wakeLock = null; } } catch(e){} }
+    document.addEventListener('visibilitychange', function(){
+      if (recording && document.visibilityState === 'visible' && !wakeLock) requestWakeLock();
+    });
+
+    // ---- 収録 開始 / 停止 ----
+    let elapsedTimer = null;
+    $('rec').onclick = async function () {
+      ensureAudio();
+      feet.L.rec = []; feet.R.rec = [];
+      recording = true; recStart = Date.now();
+      startBeepTs.L = feet.L.lastTs || recStart; startBeepTs.R = feet.R.lastTs || recStart;
+      beep(1320, 130);
+      await requestWakeLock();
+      $('rec').style.display = 'none'; $('stop').style.display = ''; $('stop').disabled = false;
+      $('downloads').innerHTML = ''; $('summary').style.display = 'none';
+      elapsedTimer = setInterval(function(){
+        const s = (Date.now() - recStart)/1000;
+        $('elapsed').textContent = '● REC  ' + s.toFixed(1) + ' s';
+      }, 100);
+      updateRecEnabled();
     };
 
-    const ctx = document.getElementById('wave').getContext('2d');
-    function render() {
-      document.getElementById('gx').textContent = lastGx.toFixed(1);
-      document.getElementById('count').textContent = count;
-      const rate = rateWindow.length;
-      const rEl = document.getElementById('rate');
-      rEl.innerHTML = rate + ' <span style="font-size:.9rem">Hz</span>';
-      rEl.className = 'val' + (count > 0 && rate < 150 ? ' warn' : '');
-      const lEl = document.getElementById('lost');
-      lEl.textContent = lost; lEl.className = 'val' + (lost > 0 ? ' warn' : '');
-      const w = ctx.canvas.width, h = ctx.canvas.height;
-      ctx.clearRect(0, 0, w, h);
-      if (buf.length > 1) {
-        let mx = 1; for (const v of buf) mx = Math.max(mx, Math.abs(v));
-        ctx.strokeStyle = 'rgba(128,128,128,.4)';
-        ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
-        ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2; ctx.beginPath();
-        for (let i = 0; i < buf.length; i++) {
-          const x = (i / (BUF_MAX - 1)) * w;
-          const y = h/2 - (buf[i] / mx) * (h/2 - 8);
-          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    $('stop').onclick = function () {
+      recording = false; recEnd = Date.now();
+      endBeepTs.L = feet.L.lastTs || recEnd; endBeepTs.R = feet.R.lastTs || recEnd;
+      beep(880, 200);
+      releaseWakeLock();
+      clearInterval(elapsedTimer);
+      $('elapsed').textContent = '';
+      $('stop').style.display = 'none'; $('rec').style.display = ''; updateRecEnabled();
+      buildDownloads();
+    };
+
+    // ---- CSV / メタ 生成 → ダウンロードボタン（モバイルは手動タップが確実） ----
+    function stamp(d) {
+      const p = n => String(n).padStart(2,'0');
+      return d.getFullYear() + p(d.getMonth()+1) + p(d.getDate()) + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+    }
+    function mkLink(name, text, blob) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name;
+      const b = document.createElement('button'); b.className = 'ghost'; b.textContent = text;
+      a.appendChild(b); return a;
+    }
+    function buildDownloads() {
+      const label = ($('label').value || 'run').replace(/[^\w\-]/g,'_');
+      const st = stamp(new Date(recStart));
+      const durS = (recEnd - recStart)/1000;
+      const dl = $('downloads'); dl.innerHTML = '';
+      const info = [];
+      ['L','R'].forEach(function(k){
+        const F = feet[k], side = k==='L' ? 'left' : 'right';
+        if (!F.connected && F.rec.length === 0) return;
+        const csv = CSV_HEADER + '\n' + F.rec.join('\n') + '\n';
+        const fname = label + '_' + st + '_' + side + '_sensor.csv';
+        dl.appendChild(mkLink(fname, '⬇ ' + (k==='L'?'左足':'右足') + ' CSV (' + F.rec.length + '行)', new Blob([csv], {type:'text/csv'})));
+        const hz = F.rec.length && durS>0 ? (F.rec.length/durS) : 0;
+        info.push(k + ': ' + F.rec.length + '行  ' + hz.toFixed(0) + 'Hz  欠損' + F.lost +
+                  (F.rec.length && (hz<150||F.lost>durS*3) ? '  ⚠要確認' : '  OK'));
+      });
+      const meta = {
+        label: label, stamp: st,
+        start_beep_epoch_ms: recStart, end_beep_epoch_ms: recEnd, duration_s: durS,
+        range: { acc: 16, gyro: 2000 },
+        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。',
+        feet: {
+          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
+          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
         }
-        ctx.stroke();
-      }
+      };
+      dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
+      const sm = $('summary'); sm.style.display = '';
+      sm.textContent = '収録 ' + durS.toFixed(1) + 's  (' + label + '_' + st + ')\n' + info.join('\n') +
+                       '\n\n※上のボタンを1つずつタップして保存。\n※CSVは既存の *_sensor.csv と同形式。実験フォルダに置けば compare_all.py / ble_quality_check.py がそのまま読めます。';
+    }
+
+    // ---- ライブ表示 ----
+    function render() {
+      ['L','R'].forEach(function(k){
+        const F = feet[k], hz = F.rateWin.length;
+        const hzEl = $('hz'+k); hzEl.textContent = (F.connected ? hz : '–') + ' Hz';
+        hzEl.className = (F.connected && F.n>0 && hz<150) ? 'warn' : '';
+        $('n'+k).textContent = recording ? F.rec.length : F.n;
+        const lEl = $('lost'+k); lEl.textContent = F.lost; lEl.className = F.lost>0 ? 'warn' : '';
+      });
       requestAnimationFrame(render);
     }
+    requestAnimationFrame(render);
   </script>
 </body>
 </html>
