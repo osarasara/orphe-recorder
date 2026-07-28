@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.6 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v0.7 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -49,7 +49,7 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.6</h1>
+  <h1>Orphe Recorder v0.7</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。</p>
 
   <div id="diag">診断中…</div>
@@ -231,22 +231,48 @@
     // CSVのtimestampは「シューズ内蔵RTCの時刻」。start_beep_epoch_ms や マーカーの t_s は
     // スマホの時計。この2つを合わせておかないと、動画同期も区間の切り出しも数百ms〜数秒ずれる。
     // （実測：260626は0.28〜0.92s、2026-07-28は1.06s ずれていた。1試技の中では一定＝時計のズレ）
+    // ★シューズの時計を直接読んで、スマホとの差を測る。
+    //   これは「時計のズレ」だけを見る（サンプル列の遅延は含まない）。
+    //   ライブラリの getDateTime は new Date(y, month, ...) に1始まりの月を渡していて
+    //   月が1つ進むバグがあるため、date.getTime() は使わず時分秒だけを取り出し、
+    //   センサ側の timestamp と同じ作り方（今日の日付＋時分秒）に揃えて比較する。
+    async function measureClockOffset(F) {
+      const t0 = Date.now();
+      const dt = await withTimeout(F.core.getDateTime(), 5000, '時計の読み出し');
+      const t1 = Date.now();
+      const d = dt.date;
+      const shoe = new Date();
+      shoe.setHours(d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds());
+      // シューズが自分の時計を読んだ実時刻 ≒ 往復の中点
+      return Math.round((t0 + t1) / 2 - shoe.getTime());   // + なら シューズが遅れている
+    }
+    // サンプル列の遅延＝最後に届いたサンプルの古さ。時計が合っていてもゼロにはならない。
+    function streamLagMs(F) { return F.lastTs ? Date.now() - F.lastTs : null; }
+
+    function showClock(F) {
+      const el = $('clk' + F.key);
+      const c = F.clockOffsetAfter, l = F.streamLag;
+      if (c === null || c === undefined) { el.textContent = '–'; el.className = ''; return; }
+      el.textContent = '時計' + c + ' / 遅延' + (l === null ? '?' : l) + 'ms';
+      el.className = (Math.abs(c) > 200) ? 'warn' : '';
+    }
+
     async function syncClock(F) {
       const el = $('clk' + F.key);
       if (!F.connected || !F.core) { el.textContent = '–'; el.className = ''; return; }
       try {
         el.textContent = '合わせ中…'; el.className = '';
-        const before = (F.lastTs ? Date.now() - F.lastTs : null);
+        F.clockOffsetBefore = await measureClockOffset(F);
         await withTimeout(F.core.syncCoreTime(3), 8000, '時計合わせ');
-        await new Promise(r => setTimeout(r, 400));           // 新しい時刻のサンプルが届くのを待つ
-        const after = (F.lastTs ? Date.now() - F.lastTs : null);
-        F.clockOffsetBefore = before; F.clockOffsetAfter = after;
-        el.textContent = (after === null) ? '同期済' : ('ズレ ' + after + 'ms');
-        el.className = (after !== null && Math.abs(after) > 200) ? 'warn' : '';
-        window.__logLine('時計合わせ(' + F.key + '): ' + before + 'ms → ' + after + 'ms');
+        await new Promise(r => setTimeout(r, 400));
+        F.clockOffsetAfter = await measureClockOffset(F);
+        F.streamLag = streamLagMs(F);
+        showClock(F);
+        window.__logLine('時計(' + F.key + '): 合わせ前 ' + F.clockOffsetBefore + 'ms → 合わせ後 ' +
+                         F.clockOffsetAfter + 'ms ／ サンプル列の遅延 ' + F.streamLag + 'ms');
       } catch (e) {
         el.textContent = '同期失敗'; el.className = 'warn';
-        F.clockOffsetAfter = (F.lastTs ? Date.now() - F.lastTs : null);
+        F.streamLag = streamLagMs(F);
         window.__logLine('時計合わせ失敗(' + F.key + '): ' + (e && e.message ? e.message : e) +
                          ' → 解析は markers[].sensor_ts を使えば影響なし');
       }
@@ -441,10 +467,10 @@
         range: { acc: 16, gyro: 2000 },
         markers: markers,
         ranges: pairedRanges(),
-        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。feet.*.battery_pctは標準BLEバッテリーサービスから読んだ残量[%]。シューズが対応していなければnullで、その場合はfeet.*.batteryの3段階(0=少ない/1=普通/2=多い)を見る。★clock_offset_ms=収録開始時点の「スマホ時計 - シューズ時計」[ms]。v0.5から接続時にsyncCoreTimeでシューズ側の時計を合わせるので、ここが±200ms以内なら健全。大きい場合は時計合わせに失敗しており、区間の切り出しは t_s でなく markers[].sensor_ts を使うこと（sensor_tsはCSVと同じシューズ時計）。clock_sync_before_msは時計を合わせる前の値。',
+        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。feet.*.battery_pctは標準BLEバッテリーサービスから読んだ残量[%]。シューズが対応していなければnullで、その場合はfeet.*.batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時刻に関する3つの値を区別すること。clock_offset_ms=シューズの時計を直接読んで測った「スマホ時計 - シューズ時計」[ms]。これが時計そのもののズレで、v0.5以降は接続時にsyncCoreTimeで合わせるので±200ms以内なら健全。stream_lag_ms=最後に届いたサンプルの古さ[ms]で、これはBLEの転送遅れ。時計が合っていてもゼロにはならない。beep_minus_last_sample_ms=収録開始時点の(スマホ時計 - 最後に届いたサンプルの時刻)で、上の2つを足したもの。★CSVのtimestampが真の時刻かどうかはclock_offset_msだけで決まる（stream_lag_msは無関係）。clock_offset_msが小さければ、CSVのtimestampとstart_beep_epoch_msは同じ時計なので、そのまま引き算してよい。',
         feet: {
-          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, battery: (feet.L.battery !== undefined ? feet.L.battery : null), battery_pct: (feet.L.battery_pct !== undefined ? feet.L.battery_pct : null), clock_offset_ms: (recStart - startBeepTs.L), clock_sync_before_ms: (feet.L.clockOffsetBefore !== undefined ? feet.L.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
-          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, battery: (feet.R.battery !== undefined ? feet.R.battery : null), battery_pct: (feet.R.battery_pct !== undefined ? feet.R.battery_pct : null), clock_offset_ms: (recStart - startBeepTs.R), clock_sync_before_ms: (feet.R.clockOffsetBefore !== undefined ? feet.R.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
+          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, battery: (feet.L.battery !== undefined ? feet.L.battery : null), battery_pct: (feet.L.battery_pct !== undefined ? feet.L.battery_pct : null), clock_offset_ms: (feet.L.clockOffsetAfter !== undefined ? feet.L.clockOffsetAfter : null), clock_offset_before_sync_ms: (feet.L.clockOffsetBefore !== undefined ? feet.L.clockOffsetBefore : null), stream_lag_ms: (feet.L.streamLag !== undefined ? feet.L.streamLag : null), beep_minus_last_sample_ms: (recStart - startBeepTs.L), start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
+          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, battery: (feet.R.battery !== undefined ? feet.R.battery : null), battery_pct: (feet.R.battery_pct !== undefined ? feet.R.battery_pct : null), clock_offset_ms: (feet.R.clockOffsetAfter !== undefined ? feet.R.clockOffsetAfter : null), clock_offset_before_sync_ms: (feet.R.clockOffsetBefore !== undefined ? feet.R.clockOffsetBefore : null), stream_lag_ms: (feet.R.streamLag !== undefined ? feet.R.streamLag : null), beep_minus_last_sample_ms: (recStart - startBeepTs.R), start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
         }
       };
       dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
