@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.5 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v0.6 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -17,6 +17,9 @@
   button.rec { background: #16a34a; }
   button.stop { background: #dc2626; }
   button.ghost { background: rgba(128,128,128,.2); color: inherit; }
+  /* 押せることが見た目で分かるユーティリティボタン（.ghostは薄すぎて無効に見えたため別クラス） */
+  button.util { background: transparent; color: #2563eb; border: 1.5px solid #2563eb; font-size: .95rem; padding: 11px 12px; }
+  button.util:disabled { color: #9ca3af; border-color: #9ca3af; background: transparent; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   label.lbl { font-size: .8rem; color: #888; display:block; margin: 4px 0 2px; }
   input[type=text] { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 10px 12px;
@@ -46,7 +49,7 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.5</h1>
+  <h1>Orphe Recorder v0.6</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。</p>
 
   <div id="diag">診断中…</div>
@@ -77,8 +80,8 @@
     </div>
   </div>
   <div class="row2">
-    <button id="bat" class="ghost">🔋 電池を読み直す</button>
-    <button id="clk" class="ghost">🕐 時計を合わせ直す</button>
+    <button id="bat" class="util">🔋 電池を読み直す</button>
+    <button id="clk" class="util">🕐 時計を合わせ直す</button>
   </div>
 
   <div id="recbar">
@@ -202,6 +205,28 @@
       osc.start(t0); osc.stop(t0 + (ms||130)/1000 + 0.02);
     }
 
+    // ---- 共通：BLEの読みが返らないときにボタンが固まらないようにする ----
+    function withTimeout(p, ms, label) {
+      return Promise.race([p, new Promise((_, rej) =>
+        setTimeout(() => rej(new Error(label + ' が ' + ms + 'ms で応答しません')), ms))]);
+    }
+
+    // Web Bluetooth は requestDevice の optionalServices に無いサービスへのアクセスを禁じる。
+    // ライブラリはORPHE独自サービスしか登録しないので、標準のバッテリーサービスを足しておく。
+    // （シューズが標準サービスを持っていれば％で読める。持っていなければ従来の3段階にフォールバック）
+    (function patchBluetoothForBattery() {
+      if (!navigator.bluetooth || !navigator.bluetooth.requestDevice) return;
+      const orig = navigator.bluetooth.requestDevice.bind(navigator.bluetooth);
+      navigator.bluetooth.requestDevice = function (opts) {
+        try {
+          const os = ((opts && opts.optionalServices) || []).slice();
+          if (os.indexOf('battery_service') === -1) os.push('battery_service');
+          opts = Object.assign({}, opts || {}, { optionalServices: os });
+        } catch (e) { window.__logLine('optionalServices追加に失敗: ' + e.message); }
+        return orig(opts);
+      };
+    })();
+
     // ---- 時計合わせ ----
     // CSVのtimestampは「シューズ内蔵RTCの時刻」。start_beep_epoch_ms や マーカーの t_s は
     // スマホの時計。この2つを合わせておかないと、動画同期も区間の切り出しも数百ms〜数秒ずれる。
@@ -212,7 +237,7 @@
       try {
         el.textContent = '合わせ中…'; el.className = '';
         const before = (F.lastTs ? Date.now() - F.lastTs : null);
-        await F.core.syncCoreTime(3);
+        await withTimeout(F.core.syncCoreTime(3), 8000, '時計合わせ');
         await new Promise(r => setTimeout(r, 400));           // 新しい時刻のサンプルが届くのを待つ
         const after = (F.lastTs ? Date.now() - F.lastTs : null);
         F.clockOffsetBefore = before; F.clockOffsetAfter = after;
@@ -229,18 +254,44 @@
     $('clk').onclick = async function () {
       if (recording) { window.__logLine('収録中は時計を合わせません'); return; }
       this.disabled = true;
-      await syncClock(feet.L); await syncClock(feet.R);
-      this.disabled = false;
+      try { await syncClock(feet.L); await syncClock(feet.R); }
+      catch (e) { window.__logLine('時計: ' + (e && e.message ? e.message : e)); }
+      finally { this.disabled = false; }   // ★何があっても押せる状態に戻す
     };
 
     // ---- 電池残量 ----
     // ORPHEのAPIは％ではなく3段階（0=少ない / 1=普通 / 2=多い）。読めた値をそのまま出す。
     const BAT_TXT = { 0: '少ない ⚠', 1: '普通', 2: '多い' };
+
+    // ①標準のバッテリーサービス(0x180F)を試す＝0-100%で読める。シューズが持っていなければ失敗する。
+    async function readBatteryPercent(F) {
+      const dev = F.core && F.core.bluetoothDevice;
+      if (!dev || !dev.gatt || !dev.gatt.connected) return null;
+      const svc = await withTimeout(dev.gatt.getPrimaryService('battery_service'), 4000, 'battery_service');
+      const ch  = await withTimeout(svc.getCharacteristic('battery_level'), 4000, 'battery_level');
+      const v   = await withTimeout(ch.readValue(), 4000, 'battery_level読み取り');
+      return v.getUint8(0);   // 0-100 [%]
+    }
+
     async function readBattery(F) {
       const el = $('bat' + F.key);
       if (!F.connected || !F.core) { el.textContent = '–'; el.className = ''; return; }
+      // ① ％で読めるなら％を優先
       try {
-        const info = await F.core.getDeviceInformation();
+        const pct = await readBatteryPercent(F);
+        if (pct !== null && pct >= 0 && pct <= 100) {
+          el.textContent = pct + ' %';
+          el.className = (pct <= 20) ? 'warn' : '';
+          F.battery_pct = pct;
+          window.__logLine('電池(' + F.key + '): 標準サービスから ' + pct + '%');
+          return;
+        }
+      } catch (e) {
+        window.__logLine('電池%は非対応(' + F.key + '): ' + (e && e.message ? e.message : e) + ' → 3段階で表示');
+      }
+      // ② ORPHE独自の3段階にフォールバック
+      try {
+        const info = await withTimeout(F.core.getDeviceInformation(), 5000, 'getDeviceInformation');
         const b = info && typeof info.battery === 'number' ? info.battery : null;
         el.textContent = (b !== null && BAT_TXT[b] !== undefined) ? BAT_TXT[b]
                        : (b !== null ? String(b) : '取得失敗');
@@ -255,8 +306,9 @@
       // 収録中はBLEを乱さないよう読まない
       if (recording) { window.__logLine('収録中は電池を読みません（BLEを乱さないため）'); return; }
       this.disabled = true;
-      await readBattery(feet.L); await readBattery(feet.R);
-      this.disabled = false;
+      try { await readBattery(feet.L); await readBattery(feet.R); }
+      catch (e) { window.__logLine('電池: ' + (e && e.message ? e.message : e)); }
+      finally { this.disabled = false; }   // ★何があっても押せる状態に戻す
     };
 
     // ---- 区間マーカー ----
@@ -389,10 +441,10 @@
         range: { acc: 16, gyro: 2000 },
         markers: markers,
         ranges: pairedRanges(),
-        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。feet.*.batteryは接続時に読んだ電池残量で、％でなく3段階(0=少ない/1=普通/2=多い)。nullは未取得。★clock_offset_ms=収録開始時点の「スマホ時計 - シューズ時計」[ms]。v0.5から接続時にsyncCoreTimeでシューズ側の時計を合わせるので、ここが±200ms以内なら健全。大きい場合は時計合わせに失敗しており、区間の切り出しは t_s でなく markers[].sensor_ts を使うこと（sensor_tsはCSVと同じシューズ時計）。clock_sync_before_msは時計を合わせる前の値。',
+        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。feet.*.battery_pctは標準BLEバッテリーサービスから読んだ残量[%]。シューズが対応していなければnullで、その場合はfeet.*.batteryの3段階(0=少ない/1=普通/2=多い)を見る。★clock_offset_ms=収録開始時点の「スマホ時計 - シューズ時計」[ms]。v0.5から接続時にsyncCoreTimeでシューズ側の時計を合わせるので、ここが±200ms以内なら健全。大きい場合は時計合わせに失敗しており、区間の切り出しは t_s でなく markers[].sensor_ts を使うこと（sensor_tsはCSVと同じシューズ時計）。clock_sync_before_msは時計を合わせる前の値。',
         feet: {
-          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, battery: (feet.L.battery !== undefined ? feet.L.battery : null), clock_offset_ms: (recStart - startBeepTs.L), clock_sync_before_ms: (feet.L.clockOffsetBefore !== undefined ? feet.L.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
-          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, battery: (feet.R.battery !== undefined ? feet.R.battery : null), clock_offset_ms: (recStart - startBeepTs.R), clock_sync_before_ms: (feet.R.clockOffsetBefore !== undefined ? feet.R.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
+          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, battery: (feet.L.battery !== undefined ? feet.L.battery : null), battery_pct: (feet.L.battery_pct !== undefined ? feet.L.battery_pct : null), clock_offset_ms: (recStart - startBeepTs.L), clock_sync_before_ms: (feet.L.clockOffsetBefore !== undefined ? feet.L.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
+          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, battery: (feet.R.battery !== undefined ? feet.R.battery : null), battery_pct: (feet.R.battery_pct !== undefined ? feet.R.battery_pct : null), clock_offset_ms: (recStart - startBeepTs.R), clock_sync_before_ms: (feet.R.clockOffsetBefore !== undefined ? feet.R.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
         }
       };
       dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
