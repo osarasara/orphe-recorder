@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.7 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v0.8 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -46,11 +46,14 @@
              background: rgba(128,128,128,.12); border-radius:10px; padding:10px 12px; margin-top:10px; }
   #log { font-family: ui-monospace, monospace; font-size: .75rem; white-space: pre-wrap;
          color: #dc2626; min-height: 1.2em; margin-top: 10px; }
+  /* 全画面フラッシュ＝動画側の同期マーカー。小さいボタンの色替えより見つけやすい。
+     pointer-events:none なので、光っている間もボタンは押せる */
+  #flash { position: fixed; inset: 0; display: none; z-index: 9999; pointer-events: none; }
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.7</h1>
-  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。</p>
+  <h1>Orphe Recorder v0.8</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。収録開始=白の全画面フラッシュ、マーカー=紫/橙のフラッシュ（動画合わせ用）。</p>
 
   <div id="diag">診断中…</div>
 
@@ -99,6 +102,7 @@
   <div id="downloads"></div>
   <pre id="summary" style="display:none"></pre>
   <div id="log"></div>
+  <div id="flash"></div>
 
   <!-- ライブラリ（同梱・CDN依存なし） -->
   <script src="js/ORPHE-CORE.js"></script>
@@ -363,10 +367,12 @@
       markers.push({
         n: markers.length + 1, kind: kind,
         epoch_ms: now, t_s: (now - recStart) / 1000,
+        // ★CSVと同じ時計（シューズ側）での時刻。切り出しにはこちらを使う
         sensor_ts: { left: feet.L.lastTs || null, right: feet.R.lastTs || null }
       });
       beep(kind === 'start' ? 1760 : 990, 70);   // 収録開始/停止のビープとは別の短い音
       if (navigator.vibrate) { try { navigator.vibrate(kind === 'start' ? 40 : [30,40,30]); } catch(e){} }
+      flash(kind === 'start' ? '#7c3aed' : '#ea580c', 120);   // 動画でも押した瞬間が見える
       renderMarks();
     }
     $('mark').onclick = addMarker;
@@ -403,23 +409,40 @@
 
     // ---- 収録 開始 / 停止 ----
     let elapsedTimer = null;
-    $('rec').onclick = async function () {
+    // 全画面フラッシュ（動画側の同期マーカー）
+    function flash(color, ms) {
+      const f = $('flash');
+      f.style.background = color;
+      f.style.display = 'block';
+      setTimeout(function(){ f.style.display = 'none'; }, ms || 150);
+    }
+
+    $('rec').onclick = function () {
       ensureAudio();
       feet.L.rec = []; feet.R.rec = [];
-      recording = true; recStart = Date.now();
-      startBeepTs.L = feet.L.lastTs || recStart; startBeepTs.R = feet.R.lastTs || recStart;
-      beep(1320, 130);
-      await requestWakeLock();
+      // ★先に画面を変える。t=0 の記録は「その描画が出る直前」に行う。
+      //   旧版は await requestWakeLock() を挟んでから画面を変えていたため、
+      //   赤が出る瞬間が t=0 より数十ms遅れていた。
       $('rec').style.display = 'none'; $('stop').style.display = ''; $('stop').disabled = false;
       $('downloads').innerHTML = ''; $('summary').style.display = 'none';
-      // ★ display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
+      // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
       markers = []; $('mark').disabled = false; renderMarks();
       $('markbar').style.display = 'block';
-      elapsedTimer = setInterval(function(){
-        const s = (Date.now() - recStart)/1000;
-        $('elapsed').textContent = '● REC  ' + s.toFixed(1) + ' s';
-      }, 100);
-      updateRecEnabled();
+      $('flash').style.background = '#ffffff'; $('flash').style.display = 'block';
+
+      requestAnimationFrame(function () {
+        // このコールバックの直後に上のDOM変更が描画される＝白フラッシュが出る瞬間
+        recording = true; recStart = Date.now();
+        startBeepTs.L = feet.L.lastTs || recStart; startBeepTs.R = feet.R.lastTs || recStart;
+        beep(1320, 130);
+        setTimeout(function(){ $('flash').style.display = 'none'; }, 150);
+        requestWakeLock();            // await しない（t=0 を遅らせないため）
+        elapsedTimer = setInterval(function(){
+          const s = (Date.now() - recStart)/1000;
+          $('elapsed').textContent = '● REC  ' + s.toFixed(1) + ' s';
+        }, 100);
+        updateRecEnabled();
+      });
     };
 
     $('stop').onclick = function () {
