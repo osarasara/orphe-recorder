@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.9 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v1.0 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -52,8 +52,8 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.9</h1>
-  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。開始は緑→赤のボタン切替が t=0（動画はこのコマに合わせる）。マーカーは紫/橙のフラッシュ。</p>
+  <h1>Orphe Recorder v1.0</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
 
   <div id="diag">診断中…</div>
 
@@ -409,7 +409,10 @@
 
     // ---- 収録 開始 / 停止 ----
     let elapsedTimer = null;
-    // 全画面フラッシュ（動画側の同期マーカー）
+    // 全画面フラッシュ（動画側の同期マーカー）。色で何のイベントかを見分ける
+    const C_FLASH_START = '#16a34a';   // 収録開始＝緑
+    const C_FLASH_STOP  = '#dc2626';   // 収録停止＝赤
+    const FLASH_MS = 150;
     function flash(color, ms) {
       const f = $('flash');
       f.style.background = color;
@@ -429,14 +432,16 @@
       markers = []; $('mark').disabled = false; renderMarks();
       // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
       $('markbar').style.display = 'block';
+      // 開始＝緑のフラッシュ。ここで表示指定だけしておき、下のrAFで描画と同時に t=0 を取る
+      // （白は画面が飛んで最初のコマが分かりにくかったので、マーカーと同じ有彩色にする）
+      $('flash').style.background = C_FLASH_START; $('flash').style.display = 'block';
 
       requestAnimationFrame(function () {
-        // このコールバックの直後に上のDOM変更が描画される＝ボタンが赤に切り替わる瞬間。
-        // 動画はこの「赤に変わったコマ」に合わせる（全画面フラッシュは境目が飛んで
-        // かえって分かりにくかったので開始時は使わない）。
+        // このコールバックの直後に上のDOM変更が描画される＝緑が出てボタンが赤に切り替わる瞬間
         recording = true; recStart = Date.now();
         startBeepTs.L = feet.L.lastTs || recStart; startBeepTs.R = feet.R.lastTs || recStart;
         beep(1320, 130);
+        setTimeout(function(){ $('flash').style.display = 'none'; }, FLASH_MS);
         requestWakeLock();            // await しない（t=0 を遅らせないため）
         elapsedTimer = setInterval(function(){
           const s = (Date.now() - recStart)/1000;
@@ -450,6 +455,7 @@
       recording = false; recEnd = Date.now();
       endBeepTs.L = feet.L.lastTs || recEnd; endBeepTs.R = feet.R.lastTs || recEnd;
       beep(880, 200);
+      flash(C_FLASH_STOP, FLASH_MS);   // 停止＝赤のフラッシュ
       releaseWakeLock();
       clearInterval(elapsedTimer);
       $('elapsed').textContent = '';
