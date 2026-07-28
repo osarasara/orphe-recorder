@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.0 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v1.1 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -52,7 +52,7 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.0</h1>
+  <h1>Orphe Recorder v1.1</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
 
   <div id="diag">診断中…</div>
@@ -255,10 +255,21 @@
 
     function showClock(F) {
       const el = $('clk' + F.key);
-      const c = F.clockOffsetAfter, l = F.streamLag;
+      // 収録後に測り直していればそちらが最新
+      const c = (F.clockOffsetAfterRec !== undefined && F.clockOffsetAfterRec !== null)
+                ? F.clockOffsetAfterRec : F.clockOffsetAfter;
+      const l = F.streamLag;
       if (c === null || c === undefined) { el.textContent = '–'; el.className = ''; return; }
-      el.textContent = '時計' + c + ' / 遅延' + (l === null ? '?' : l) + 'ms';
-      el.className = (Math.abs(c) > 200) ? 'warn' : '';
+      let txt = '時計' + c + ' / 遅延' + (l === null ? '?' : l) + 'ms';
+      const drift = clockDrift(F);
+      if (drift !== null) txt += '  ずれ' + (drift >= 0 ? '+' : '') + drift;
+      el.textContent = txt;
+      el.className = (Math.abs(c) > 200 || (drift !== null && Math.abs(drift) > 50)) ? 'warn' : '';
+    }
+    // 収録中に時計がどれだけ動いたか（接続時の値と収録後の値の差）
+    function clockDrift(F) {
+      const a = F.clockOffsetAfter, b = F.clockOffsetAfterRec;
+      return (a === undefined || a === null || b === undefined || b === null) ? null : (b - a);
     }
 
     async function syncClock(F) {
@@ -451,16 +462,39 @@
       });
     };
 
-    $('stop').onclick = function () {
+    $('stop').onclick = async function () {
       recording = false; recEnd = Date.now();
       endBeepTs.L = feet.L.lastTs || recEnd; endBeepTs.R = feet.R.lastTs || recEnd;
       beep(880, 200);
       flash(C_FLASH_STOP, FLASH_MS);   // 停止＝赤のフラッシュ
       releaseWakeLock();
       clearInterval(elapsedTimer);
-      $('elapsed').textContent = '';
       $('stop').style.display = 'none'; $('rec').style.display = ''; updateRecEnabled();
       $('mark').disabled = true; $('undo').disabled = true;   // 区間リストは保存確認用に残す
+
+      // ★収録の直後にシューズの時計をもう一度測る（自動）。
+      //   接続時の値との差＝収録中に時計が動いた量（ドリフト）。
+      //   小さければ、解析側は t0 = start_beep_epoch_ms − clock_offset として
+      //   BLEの転送遅れ(約37ms)を消せる。大きければ接続時の値はもう古いので使わず、
+      //   start_beep_sensor_ts（＝データの先頭合わせ）に留める、という判断ができる。
+      $('elapsed').textContent = '時計を測定中…';
+      for (const k of ['L', 'R']) {
+        const F = feet[k];
+        if (!F.connected || !F.core) continue;
+        try {
+          F.clockOffsetAfterRec = await measureClockOffset(F);
+          F.streamLag = streamLagMs(F);
+          showClock(F);
+          const d = clockDrift(F);
+          window.__logLine('収録後の時計(' + k + '): ' + F.clockOffsetAfterRec + 'ms' +
+                           (d === null ? '' : '（接続時から ' + (d >= 0 ? '+' : '') + d + 'ms 動いた）'));
+        } catch (e) {
+          F.clockOffsetAfterRec = null;
+          window.__logLine('収録後の時計測定に失敗(' + k + '): ' + (e && e.message ? e.message : e) +
+                           ' → 解析は start_beep_sensor_ts を使えば影響なし');
+        }
+      }
+      $('elapsed').textContent = '';
       buildDownloads();
     };
 
@@ -475,6 +509,24 @@
       const b = document.createElement('button'); b.className = 'ghost'; b.textContent = text;
       a.appendChild(b); return a;
     }
+    // 1足ぶんのメタ。長い三項演算子をインラインで並べると読めなくなるので関数に出す
+    const orNull = v => (v === undefined ? null : v);
+    function footMeta(F, startTs, endTs) {
+      const atConnect = orNull(F.clockOffsetAfter);      // 接続時（syncCoreTime直後）に測った時計のズレ
+      const afterRec  = orNull(F.clockOffsetAfterRec);   // 収録の直後に測り直した時計のズレ
+      return {
+        connected: F.connected, samples: F.rec.length, lost: F.lost,
+        battery: orNull(F.battery), battery_pct: orNull(F.battery_pct),
+        clock_offset_at_connect_ms: atConnect,
+        clock_offset_after_rec_ms: afterRec,
+        clock_drift_during_rec_ms: (atConnect === null || afterRec === null) ? null : (afterRec - atConnect),
+        clock_offset_before_sync_ms: orNull(F.clockOffsetBefore),
+        stream_lag_ms: orNull(F.streamLag),
+        beep_minus_last_sample_ms: (recStart - startTs),
+        start_beep_sensor_ts: startTs, end_beep_sensor_ts: endTs
+      };
+    }
+
     function buildDownloads() {
       const label = ($('label').value || 'run').replace(/[^\w\-]/g,'_');
       const st = stamp(new Date(recStart));
@@ -488,8 +540,11 @@
         const fname = label + '_' + st + '_' + side + '_sensor.csv';
         dl.appendChild(mkLink(fname, '⬇ ' + (k==='L'?'左足':'右足') + ' CSV (' + F.rec.length + '行)', new Blob([csv], {type:'text/csv'})));
         const hz = F.rec.length && durS>0 ? (F.rec.length/durS) : 0;
+        const dr = clockDrift(F);
+        const clkTxt = (dr === null) ? '  時計:未測定'
+              : ('  時計ずれ' + (dr >= 0 ? '+' : '') + dr + 'ms' + (Math.abs(dr) <= 50 ? '(安定)' : '(⚠動いた)'));
         info.push(k + ': ' + F.rec.length + '行  ' + hz.toFixed(0) + 'Hz  欠損' + F.lost +
-                  (F.rec.length && (hz<150||F.lost>durS*3) ? '  ⚠要確認' : '  OK'));
+                  (F.rec.length && (hz<150||F.lost>durS*3) ? '  ⚠要確認' : '  OK') + clkTxt);
       });
       const meta = {
         label: label, stamp: st,
@@ -497,10 +552,11 @@
         range: { acc: 16, gyro: 2000 },
         markers: markers,
         ranges: pairedRanges(),
-        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。feet.*.battery_pctは標準BLEバッテリーサービスから読んだ残量[%]。シューズが対応していなければnullで、その場合はfeet.*.batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時刻に関する3つの値を区別すること。clock_offset_ms=シューズの時計を直接読んで測った「スマホ時計 - シューズ時計」[ms]。これが時計そのもののズレで、v0.5以降は接続時にsyncCoreTimeで合わせるので±200ms以内なら健全。stream_lag_ms=最後に届いたサンプルの古さ[ms]で、これはBLEの転送遅れ。時計が合っていてもゼロにはならない。beep_minus_last_sample_ms=収録開始時点の(スマホ時計 - 最後に届いたサンプルの時刻)で、上の2つを足したもの。★CSVのtimestampが真の時刻かどうかはclock_offset_msだけで決まる（stream_lag_msは無関係）。clock_offset_msが小さければ、CSVのtimestampとstart_beep_epoch_msは同じ時計なので、そのまま引き算してよい。',
+        note: 'timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
+
         feet: {
-          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, battery: (feet.L.battery !== undefined ? feet.L.battery : null), battery_pct: (feet.L.battery_pct !== undefined ? feet.L.battery_pct : null), clock_offset_ms: (feet.L.clockOffsetAfter !== undefined ? feet.L.clockOffsetAfter : null), clock_offset_before_sync_ms: (feet.L.clockOffsetBefore !== undefined ? feet.L.clockOffsetBefore : null), stream_lag_ms: (feet.L.streamLag !== undefined ? feet.L.streamLag : null), beep_minus_last_sample_ms: (recStart - startBeepTs.L), start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
-          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, battery: (feet.R.battery !== undefined ? feet.R.battery : null), battery_pct: (feet.R.battery_pct !== undefined ? feet.R.battery_pct : null), clock_offset_ms: (feet.R.clockOffsetAfter !== undefined ? feet.R.clockOffsetAfter : null), clock_offset_before_sync_ms: (feet.R.clockOffsetBefore !== undefined ? feet.R.clockOffsetBefore : null), stream_lag_ms: (feet.R.streamLag !== undefined ? feet.R.streamLag : null), beep_minus_last_sample_ms: (recStart - startBeepTs.R), start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
+          left:  footMeta(feet.L, startBeepTs.L, endBeepTs.L),
+          right: footMeta(feet.R, startBeepTs.R, endBeepTs.R),
         }
       };
       dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
