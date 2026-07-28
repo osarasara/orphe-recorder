@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.8 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v0.9 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -52,8 +52,8 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.8</h1>
-  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。収録開始=白の全画面フラッシュ、マーカー=紫/橙のフラッシュ（動画合わせ用）。</p>
+  <h1>Orphe Recorder v0.9</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。開始は緑→赤のボタン切替が t=0（動画はこのコマに合わせる）。マーカーは紫/橙のフラッシュ。</p>
 
   <div id="diag">診断中…</div>
 
@@ -427,15 +427,16 @@
       $('downloads').innerHTML = ''; $('summary').style.display = 'none';
       // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
       markers = []; $('mark').disabled = false; renderMarks();
+      // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
       $('markbar').style.display = 'block';
-      $('flash').style.background = '#ffffff'; $('flash').style.display = 'block';
 
       requestAnimationFrame(function () {
-        // このコールバックの直後に上のDOM変更が描画される＝白フラッシュが出る瞬間
+        // このコールバックの直後に上のDOM変更が描画される＝ボタンが赤に切り替わる瞬間。
+        // 動画はこの「赤に変わったコマ」に合わせる（全画面フラッシュは境目が飛んで
+        // かえって分かりにくかったので開始時は使わない）。
         recording = true; recStart = Date.now();
         startBeepTs.L = feet.L.lastTs || recStart; startBeepTs.R = feet.R.lastTs || recStart;
         beep(1320, 130);
-        setTimeout(function(){ $('flash').style.display = 'none'; }, 150);
         requestWakeLock();            // await しない（t=0 を遅らせないため）
         elapsedTimer = setInterval(function(){
           const s = (Date.now() - recStart)/1000;
