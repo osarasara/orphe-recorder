@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.3 — 走行データ収録（両足）</title>
+<title>Orphe Recorder v0.4 — 走行データ収録（両足・区間マーカー）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -30,6 +30,13 @@
   .warn { color:#dc2626; }
   #recbar { margin: 14px 0 6px; }
   #elapsed { text-align:center; font-size:1.6rem; font-weight:700; font-variant-numeric: tabular-nums; margin: 6px 0; }
+  /* 区間マーカー：走る直前/直後に押す。狙いを外しにくいよう大きく */
+  #markbar { display:none; margin: 4px 0 10px; }
+  button#mark { font-size: 1.5rem; font-weight: 700; padding: 30px 18px; background: #7c3aed; }
+  button#mark.ending { background: #ea580c; }
+  button#undo { font-size: .9rem; padding: 9px 14px; }
+  #marks { font-family: ui-monospace, monospace; font-size: .82rem; white-space: pre-wrap;
+           background: rgba(124,58,237,.13); border-radius: 10px; padding: 8px 12px; margin-top: 8px; min-height: 1.2em; }
   #downloads { margin-top: 12px; }
   #downloads a { display:block; text-align:center; text-decoration:none; }
   #summary { font-family: ui-monospace, monospace; font-size:.78rem; white-space:pre-wrap;
@@ -39,8 +46,8 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.3</h1>
-  <p class="sub">走行データ収録（両足L/R・ビープ同期・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録。</p>
+  <h1>Orphe Recorder v0.4</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。</p>
 
   <div id="diag">診断中…</div>
 
@@ -71,6 +78,12 @@
     <button id="stop" class="stop" disabled style="display:none">■ 収録停止</button>
   </div>
   <div id="elapsed"></div>
+
+  <div id="markbar">
+    <button id="mark">▶ 区間 開始</button>
+    <button id="undo" class="ghost">↩ 直前のマーカーを取り消し</button>
+    <div id="marks">マーカーなし</div>
+  </div>
 
   <div id="downloads"></div>
   <pre id="summary" style="display:none"></pre>
@@ -107,6 +120,7 @@
     };
     let recording = false, recStart = 0, recEnd = 0, wakeLock = null, audioCtx = null;
     const startBeepTs = {}, endBeepTs = {};
+    let markers = [];   // 区間マーカー（走る直前/直後に押す）。フラットなイベント列で持つ
     const $ = id => document.getElementById(id);
 
     // ---- サンプル受信（gotGyro時点で core.acc / core.quat も同一サンプル値） ----
@@ -178,6 +192,58 @@
       osc.start(t0); osc.stop(t0 + (ms||130)/1000 + 0.02);
     }
 
+    // ---- 区間マーカー ----
+    // 押すたびに開始/終了が交互になる（表示で次に何を打つか分かる）。
+    // 保存はフラットなイベント列＝押し間違いを解析側で解釈し直せる。
+    // t_s は「収録開始ビープからの秒」＝解析側の時系列図の横軸と同じ数字。
+    function nextKind() { return (markers.length % 2 === 0) ? 'start' : 'end'; }
+    function renderMarks() {
+      const isEnd = nextKind() === 'end';
+      $('mark').textContent = isEnd ? '■ 区間 終了' : '▶ 区間 開始';
+      $('mark').className = isEnd ? 'ending' : '';
+      $('undo').disabled = markers.length === 0;
+      if (!markers.length) { $('marks').textContent = 'マーカーなし'; return; }
+      const lines = [];
+      for (let i = 0; i < markers.length; i += 2) {
+        const a = markers[i], b = markers[i+1];
+        const no = String(i/2 + 1).padStart(2,' ');
+        lines.push(b ? `${no}) ${a.t_s.toFixed(1)}s → ${b.t_s.toFixed(1)}s   (${(b.t_s-a.t_s).toFixed(1)}s)`
+                     : `${no}) ${a.t_s.toFixed(1)}s → …計測中`);
+      }
+      $('marks').textContent = lines.join('\n');
+    }
+    function addMarker() {
+      if (!recording) return;
+      const now = Date.now(), kind = nextKind();
+      markers.push({
+        n: markers.length + 1, kind: kind,
+        epoch_ms: now, t_s: (now - recStart) / 1000,
+        sensor_ts: { left: feet.L.lastTs || null, right: feet.R.lastTs || null }
+      });
+      beep(kind === 'start' ? 1760 : 990, 70);   // 収録開始/停止のビープとは別の短い音
+      if (navigator.vibrate) { try { navigator.vibrate(kind === 'start' ? 40 : [30,40,30]); } catch(e){} }
+      renderMarks();
+    }
+    $('mark').onclick = addMarker;
+    $('undo').onclick = function () { markers.pop(); renderMarks(); };
+
+    // 対になったマーカーだけを区間に畳む（末尾が開きっぱなしなら収録終了で閉じる）
+    function pairedRanges() {
+      const out = [];
+      for (let i = 0; i < markers.length; i += 2) {
+        const a = markers[i], b = markers[i+1];
+        out.push({
+          index: out.length + 1,
+          start_s: +a.t_s.toFixed(3),
+          end_s: b ? +b.t_s.toFixed(3) : +((recEnd - recStart)/1000).toFixed(3),
+          closed: !!b,
+          start_epoch_ms: a.epoch_ms,
+          end_epoch_ms: b ? b.epoch_ms : recEnd
+        });
+      }
+      return out;
+    }
+
     // ---- Wake Lock ----
     async function requestWakeLock() {
       try {
@@ -201,6 +267,7 @@
       await requestWakeLock();
       $('rec').style.display = 'none'; $('stop').style.display = ''; $('stop').disabled = false;
       $('downloads').innerHTML = ''; $('summary').style.display = 'none';
+      markers = []; renderMarks(); $('markbar').style.display = '';
       elapsedTimer = setInterval(function(){
         const s = (Date.now() - recStart)/1000;
         $('elapsed').textContent = '● REC  ' + s.toFixed(1) + ' s';
@@ -216,6 +283,7 @@
       clearInterval(elapsedTimer);
       $('elapsed').textContent = '';
       $('stop').style.display = 'none'; $('rec').style.display = ''; updateRecEnabled();
+      $('mark').disabled = true; $('undo').disabled = true;   // 区間リストは保存確認用に残す
       buildDownloads();
     };
 
@@ -250,7 +318,9 @@
         label: label, stamp: st,
         start_beep_epoch_ms: recStart, end_beep_epoch_ms: recEnd, duration_s: durS,
         range: { acc: 16, gyro: 2000 },
-        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。',
+        markers: markers,
+        ranges: pairedRanges(),
+        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。',
         feet: {
           left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
           right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
@@ -258,7 +328,11 @@
       };
       dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
       const sm = $('summary'); sm.style.display = '';
-      sm.textContent = '収録 ' + durS.toFixed(1) + 's  (' + label + '_' + st + ')\n' + info.join('\n') +
+      const rg = pairedRanges();
+      const rgTxt = rg.length
+        ? '\n区間 ' + rg.length + '本: ' + rg.map(r => r.start_s.toFixed(1)+'-'+r.end_s.toFixed(1)+'s'+(r.closed?'':'*')).join(', ')
+        : '\n区間マーカーなし（全区間が解析対象）';
+      sm.textContent = '収録 ' + durS.toFixed(1) + 's  (' + label + '_' + st + ')\n' + info.join('\n') + rgTxt +
                        '\n\n※上のボタンを1つずつタップして保存。\n※CSVは既存の *_sensor.csv と同形式。実験フォルダに置けば compare_all.py / ble_quality_check.py がそのまま読めます。';
     }
 
