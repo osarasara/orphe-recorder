@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.4 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v1.5 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -64,7 +64,7 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.4</h1>
+  <h1>Orphe Recorder v1.5</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。音ありモードなら紫で音が鳴り、橙で止まる（1回の収録で何本でも）。全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
 
   <div id="diag">診断中…</div>
@@ -115,7 +115,8 @@
     <h2>🎧 音をつくる（次の試技で流す）</h2>
     <select id="sonrange"></select>
     <div class="fld">ローパス <input type="number" id="soncut" value="15" min="0" max="80" step="1"> Hz
-      　位相の逓倍 <input type="number" id="sonn" value="200" min="10" max="2000" step="10"></div>
+      　位相の逓倍 <input type="number" id="sonn" value="200" min="10" max="4000" step="10">
+      <button id="sonnreset" class="util" style="width:auto;padding:6px 10px;font-size:.8rem;margin:0">自動に戻す</button></div>
     <button id="songen" class="son">この区間から音をつくる</button>
     <div class="row2">
       <button id="sonplay" class="util" disabled>▶ 試聴</button>
@@ -468,6 +469,13 @@
     // 再生は音声専用スレッドで走るのでBLE受信（本体スレッド）とは干渉しない。
     const SON_SR = 44100;
     let sonBuf = null, sonSrc = null, sonMeta = null, sonWav = null, sonMode = 'phase';
+    // 逓倍数Nは可聴域に上げるためのギア比。中心が TARGET_HZ 付近に来るよう初回だけ自動で決め、
+    // 以降はその値に固定する（AとBで違うNの音は比べられないため）。
+    let nLocked = null;
+    const TARGET_HZ = 250;
+    $('sonnreset').onclick = function () {
+      nLocked = null; $('soninfo').textContent = '逓倍数の固定を解除しました。次に作るとき自動で決め直します';
+    };
 
     function rangesForSound() {
       // 対になった区間だけを対象にする（左足優先、無ければ右足）
@@ -536,7 +544,18 @@
         try {
           const gyro = gyroSeries(F, r.from, r.to);
           const an = Sonify.analytic(gyro, 200, cut);
-          const samples = Sonify.renderPhaseSound(an.amp, an.phase, 200, SON_SR, nMult);
+          // 1周にかかる時間を測ってから逓倍数を決める（初回のみ。以降は固定値を使う）
+          const lapsPre = Math.abs(an.phase[an.phase.length - 1] - an.phase[0]) / (2 * Math.PI);
+          const cyclePre = (gyro.length / 200) / Math.max(lapsPre, 1e-9);
+          let nUse;
+          if (nLocked === null) {
+            nUse = Math.max(10, Math.round(TARGET_HZ * cyclePre / 10) * 10);
+            nLocked = nUse; $('sonn').value = nUse;
+          } else {
+            nUse = (nMult === nLocked) ? nLocked : nMult;   // 手で変えたらそれを尊重して固定し直す
+            nLocked = nUse; $('sonn').value = nUse;
+          }
+          const samples = Sonify.renderPhaseSound(an.amp, an.phase, 200, SON_SR, nUse);
           sonBuf = makeAudioBuffer(samples);
           sonWav = Sonify.toWavBlob(samples, SON_SR);
           sonMode = 'phase';
@@ -544,21 +563,19 @@
           const laps = Math.abs(an.phase[an.phase.length - 1] - an.phase[0]) / (2 * Math.PI);
           const durS = gyro.length / 200;
           sonMeta = { range_index: r.idx, foot: r.foot, from_sensor_ts: r.from, to_sensor_ts: r.to,
-                      cutoff_hz: cut, n_mult: nMult, duration_s: +durS.toFixed(3),
+                      cutoff_hz: cut, n_mult: nUse, n_auto: (nUse !== nMult), duration_s: +durS.toFixed(3),
                       laps: +laps.toFixed(2), cycle_s: +(durS / Math.max(laps, 1e-9)).toFixed(3),
                       sample_rate: SON_SR, mode: 'phase' };
-          const ctr = Math.round(nMult / sonMeta.cycle_s);
+          const ctr = Math.round(nUse / sonMeta.cycle_s);
           sonMeta.center_hz = ctr;
           // 逓倍数Nは可聴域に上げるためだけの定数。区間の周期が変わると中心も動くので確認する。
           // ★AとBで同じNを使うこと（違うNの音は比べられない）
           let warn = '';
-          if (ctr < 80) warn = `\n⚠ 低すぎる（${ctr}Hz）。逓倍を ${Math.round(250 * sonMeta.cycle_s / 10) * 10} くらいに上げる`;
-          else if (ctr > 2000) warn = `\n⚠ 高すぎる（${ctr}Hz）。逓倍を ${Math.round(400 * sonMeta.cycle_s / 10) * 10} くらいに下げる`;
           if (laps < 1.5) warn += `\n⚠ 区間に位相が ${laps.toFixed(1)}周しか入っていない。区間が短すぎるかも`;
           $('soninfo').textContent =
             `区間${r.idx}(${r.foot})から生成\n長さ ${durS.toFixed(2)}s  位相 ${laps.toFixed(1)}周  1周 ${sonMeta.cycle_s}s\n` +
-            `ローパス ${cut}Hz  逓倍 ${nMult}  → 中心およそ ${ctr}Hz` + warn +
-            `\n※AとBでは同じ逓倍数を使うこと`;
+            `ローパス ${cut}Hz  逓倍 ${nUse}（${sonMeta.n_auto ? '自動' : '手動'}・以後この値で固定）\n` +
+            `→ 中心およそ ${ctr}Hz` + warn;
           $('sonplay').disabled = false; $('sonmetro').disabled = false;
           rebuildDownloads();
         } catch (e) {
