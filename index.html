@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.2 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v1.3 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -64,8 +64,8 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.2</h1>
-  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
+  <h1>Orphe Recorder v1.3</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。音ありモードなら紫で音が鳴り、橙で止まる（1回の収録で何本でも）。全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
 
   <div id="diag">診断中…</div>
 
@@ -122,7 +122,7 @@
       <button id="sonmetro" class="util" disabled>♩ メトロノームに切替</button>
     </div>
     <label class="chk"><input type="checkbox" id="sonloop" checked> くり返し再生する</label>
-    <label class="chk"><input type="checkbox" id="sonwith"> <b>次の収録で、この音を鳴らしながら録る</b></label>
+    <label class="chk"><input type="checkbox" id="sonwith"> <b>収録中、紫（区間開始）を押したら音を鳴らす</b></label>
     <div id="soninfo">まだ作っていません</div>
   </div>
 
@@ -396,8 +396,9 @@
       for (let i = 0; i < markers.length; i += 2) {
         const a = markers[i], b = markers[i+1];
         const no = String(i/2 + 1).padStart(2,' ');
-        lines.push(b ? `${no}) ${a.t_s.toFixed(1)}s → ${b.t_s.toFixed(1)}s   (${(b.t_s-a.t_s).toFixed(1)}s)`
-                     : `${no}) ${a.t_s.toFixed(1)}s → …計測中`);
+        const snd = a.sound_playing ? ' ♪' : '';
+        lines.push(b ? `${no}) ${a.t_s.toFixed(1)}s → ${b.t_s.toFixed(1)}s   (${(b.t_s-a.t_s).toFixed(1)}s)${snd}`
+                     : `${no}) ${a.t_s.toFixed(1)}s → …計測中${snd}`);
       }
       $('marks').textContent = lines.join('\n');
     }
@@ -410,6 +411,16 @@
         // ★CSVと同じ時計（シューズ側）での時刻。切り出しにはこちらを使う
         sensor_ts: { left: feet.L.lastTs || null, right: feet.R.lastTs || null }
       });
+      // ★音ありモードなら、紫（区間開始）で再生、橙（区間終了）で停止。
+      //   収録開始で鳴らすと、スタート地点まで歩いている間に音が終わってしまう。
+      //   紫を起点にすれば、1回の収録で何本でもできて、
+      //   音の0秒＝試技Bの紫の時刻＝試技Aの紫の時刻 が直接対応する。
+      let played = false;
+      if (playWithRec && sonBuf) {
+        if (kind === 'start') { startSound(); $('sonplay').textContent = '■ 停止'; played = true; }
+        else { stopSound(); }
+      }
+      markers[markers.length - 1].sound_playing = played;
       beep(kind === 'start' ? 1760 : 990, 70);   // 収録開始/停止のビープとは別の短い音
       if (navigator.vibrate) { try { navigator.vibrate(kind === 'start' ? 40 : [30,40,30]); } catch(e){} }
       flash(kind === 'start' ? '#7c3aed' : '#ea580c', 120);   // 動画でも押した瞬間が見える
@@ -428,6 +439,7 @@
           start_s: +a.t_s.toFixed(3),
           end_s: b ? +b.t_s.toFixed(3) : +((recEnd - recStart)/1000).toFixed(3),
           closed: !!b,
+          sound_playing: !!a.sound_playing,
           start_epoch_ms: a.epoch_ms,
           end_epoch_ms: b ? b.epoch_ms : recEnd
         });
@@ -633,10 +645,6 @@
         // このコールバックの直後に上のDOM変更が描画される＝緑が出てボタンが赤に切り替わる瞬間
         recording = true; recStart = Date.now();
         startBeepTs.L = feet.L.lastTs || recStart; startBeepTs.R = feet.R.lastTs || recStart;
-        // ★音ありモード：収録開始と同時に再生を始める。
-        //   こうすると音の0秒＝試技Aの区間の始まり＝試技Bの収録開始 が一致し、
-        //   AとBを後から突き合わせる手続きが要らなくなる。
-        if (playWithRec && sonBuf) { startSound(); $('sonplay').textContent = '■ 停止'; }
         beep(1320, 130);
         setTimeout(function(){ $('flash').style.display = 'none'; }, FLASH_MS);
         requestWakeLock();            // await しない（t=0 を遅らせないため）
