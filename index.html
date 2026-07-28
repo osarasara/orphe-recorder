@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v0.4 — 走行データ収録（両足・区間マーカー）</title>
+<title>Orphe Recorder v0.5 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -46,7 +46,7 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v0.4</h1>
+  <h1>Orphe Recorder v0.5</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。</p>
 
   <div id="diag">診断中…</div>
@@ -63,6 +63,7 @@
       <div class="m"><span>サンプル</span><b id="nL">0</b></div>
       <div class="m"><span>欠損</span><b id="lostL">0</b></div>
       <div class="m"><span>電池</span><b id="batL">–</b></div>
+      <div class="m"><span>時計</span><b id="clkL">–</b></div>
     </div>
     <div class="foot" id="footR">
       <h2>右足 (R)</h2>
@@ -72,9 +73,13 @@
       <div class="m"><span>サンプル</span><b id="nR">0</b></div>
       <div class="m"><span>欠損</span><b id="lostR">0</b></div>
       <div class="m"><span>電池</span><b id="batR">–</b></div>
+      <div class="m"><span>時計</span><b id="clkR">–</b></div>
     </div>
   </div>
-  <button id="bat" class="ghost">🔋 電池残量を読み直す</button>
+  <div class="row2">
+    <button id="bat" class="ghost">🔋 電池を読み直す</button>
+    <button id="clk" class="ghost">🕐 時計を合わせ直す</button>
+  </div>
 
   <div id="recbar">
     <button id="rec" class="rec" disabled>● 収録開始</button>
@@ -163,6 +168,7 @@
         btn.disabled = false;
         updateRecEnabled();
         readBattery(F);   // 接続直後に一度読む（失敗しても接続は壊さない）
+        syncClock(F);     // ★シューズ側の時計をスマホに合わせる（これを呼ばないとCSVの時刻が数百ms〜数秒ずれる）
       } catch (e) {
         const msg = (e && e.message) ? e.message : String(e);
         stEl.textContent = '接続失敗: ' + msg;
@@ -195,6 +201,37 @@
       osc.connect(g).connect(audioCtx.destination);
       osc.start(t0); osc.stop(t0 + (ms||130)/1000 + 0.02);
     }
+
+    // ---- 時計合わせ ----
+    // CSVのtimestampは「シューズ内蔵RTCの時刻」。start_beep_epoch_ms や マーカーの t_s は
+    // スマホの時計。この2つを合わせておかないと、動画同期も区間の切り出しも数百ms〜数秒ずれる。
+    // （実測：260626は0.28〜0.92s、2026-07-28は1.06s ずれていた。1試技の中では一定＝時計のズレ）
+    async function syncClock(F) {
+      const el = $('clk' + F.key);
+      if (!F.connected || !F.core) { el.textContent = '–'; el.className = ''; return; }
+      try {
+        el.textContent = '合わせ中…'; el.className = '';
+        const before = (F.lastTs ? Date.now() - F.lastTs : null);
+        await F.core.syncCoreTime(3);
+        await new Promise(r => setTimeout(r, 400));           // 新しい時刻のサンプルが届くのを待つ
+        const after = (F.lastTs ? Date.now() - F.lastTs : null);
+        F.clockOffsetBefore = before; F.clockOffsetAfter = after;
+        el.textContent = (after === null) ? '同期済' : ('ズレ ' + after + 'ms');
+        el.className = (after !== null && Math.abs(after) > 200) ? 'warn' : '';
+        window.__logLine('時計合わせ(' + F.key + '): ' + before + 'ms → ' + after + 'ms');
+      } catch (e) {
+        el.textContent = '同期失敗'; el.className = 'warn';
+        F.clockOffsetAfter = (F.lastTs ? Date.now() - F.lastTs : null);
+        window.__logLine('時計合わせ失敗(' + F.key + '): ' + (e && e.message ? e.message : e) +
+                         ' → 解析は markers[].sensor_ts を使えば影響なし');
+      }
+    }
+    $('clk').onclick = async function () {
+      if (recording) { window.__logLine('収録中は時計を合わせません'); return; }
+      this.disabled = true;
+      await syncClock(feet.L); await syncClock(feet.R);
+      this.disabled = false;
+    };
 
     // ---- 電池残量 ----
     // ORPHEのAPIは％ではなく3段階（0=少ない / 1=普通 / 2=多い）。読めた値をそのまま出す。
@@ -352,10 +389,10 @@
         range: { acc: 16, gyro: 2000 },
         markers: markers,
         ranges: pairedRanges(),
-        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。feet.*.batteryは接続時に読んだ電池残量で、％でなく3段階(0=少ない/1=普通/2=多い)。nullは未取得。',
+        note: 'timestamp=デバイス時刻(PC時計に同期,epoch ms)。start/end_beep_epoch_msはCSV timestampと同じ時計＝動画の同期用。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列。t_sはstart_beep_epoch_msからの秒＝解析側の時系列図の横軸と同じ）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに収録停止した区間で、収録終了時刻で閉じてある）。feet.*.batteryは接続時に読んだ電池残量で、％でなく3段階(0=少ない/1=普通/2=多い)。nullは未取得。★clock_offset_ms=収録開始時点の「スマホ時計 - シューズ時計」[ms]。v0.5から接続時にsyncCoreTimeでシューズ側の時計を合わせるので、ここが±200ms以内なら健全。大きい場合は時計合わせに失敗しており、区間の切り出しは t_s でなく markers[].sensor_ts を使うこと（sensor_tsはCSVと同じシューズ時計）。clock_sync_before_msは時計を合わせる前の値。',
         feet: {
-          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, battery: (feet.L.battery !== undefined ? feet.L.battery : null), start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
-          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, battery: (feet.R.battery !== undefined ? feet.R.battery : null), start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
+          left:  { connected: feet.L.connected, samples: feet.L.rec.length, lost: feet.L.lost, battery: (feet.L.battery !== undefined ? feet.L.battery : null), clock_offset_ms: (recStart - startBeepTs.L), clock_sync_before_ms: (feet.L.clockOffsetBefore !== undefined ? feet.L.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.L, end_beep_sensor_ts: endBeepTs.L },
+          right: { connected: feet.R.connected, samples: feet.R.rec.length, lost: feet.R.lost, battery: (feet.R.battery !== undefined ? feet.R.battery : null), clock_offset_ms: (recStart - startBeepTs.R), clock_sync_before_ms: (feet.R.clockOffsetBefore !== undefined ? feet.R.clockOffsetBefore : null), start_beep_sensor_ts: startBeepTs.R, end_beep_sensor_ts: endBeepTs.R },
         }
       };
       dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
