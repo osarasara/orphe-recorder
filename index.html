@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.1 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v1.2 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -49,10 +49,22 @@
   /* 全画面フラッシュ＝動画側の同期マーカー。小さいボタンの色替えより見つけやすい。
      pointer-events:none なので、光っている間もボタンは押せる */
   #flash { position: fixed; inset: 0; display: none; z-index: 9999; pointer-events: none; }
+  /* 音づくり（試技Aのあと、次の試技の前にここで作っておく） */
+  #sonbar { display:none; border:1px solid rgba(124,58,237,.45); border-radius:12px; padding:10px 12px; margin-top:12px; }
+  #sonbar h2 { font-size:.95rem; margin:0 0 8px; }
+  #sonbar .fld { display:flex; align-items:center; gap:8px; margin-bottom:6px; font-size:.85rem; color:#888; }
+  #sonbar .fld input[type=number] { width:5.5em; margin:0; padding:6px 8px; font-size:.9rem; }
+  #sonbar select { width:100%; padding:9px 10px; border-radius:10px; font-size:.95rem;
+                   border:1px solid rgba(128,128,128,.4); background:transparent; color:inherit; margin-bottom:8px; }
+  #soninfo { font-family: ui-monospace, monospace; font-size:.78rem; white-space:pre-wrap;
+             background: rgba(124,58,237,.13); border-radius:10px; padding:8px 12px; margin-top:6px; }
+  button.son { background:#7c3aed; }
+  label.chk { display:flex; align-items:center; gap:8px; font-size:.9rem; margin:8px 0; }
+  label.chk input { width:auto; }
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.1</h1>
+  <h1>Orphe Recorder v1.2</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前と直後に紫のボタン。全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
 
   <div id="diag">診断中…</div>
@@ -99,6 +111,21 @@
     <div id="marks">マーカーなし</div>
   </div>
 
+  <div id="sonbar">
+    <h2>🎧 音をつくる（次の試技で流す）</h2>
+    <select id="sonrange"></select>
+    <div class="fld">ローパス <input type="number" id="soncut" value="15" min="0" max="80" step="1"> Hz
+      　位相の逓倍 <input type="number" id="sonn" value="200" min="10" max="2000" step="10"></div>
+    <button id="songen" class="son">この区間から音をつくる</button>
+    <div class="row2">
+      <button id="sonplay" class="util" disabled>▶ 試聴</button>
+      <button id="sonmetro" class="util" disabled>♩ メトロノームに切替</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="sonloop" checked> くり返し再生する</label>
+    <label class="chk"><input type="checkbox" id="sonwith"> <b>次の収録で、この音を鳴らしながら録る</b></label>
+    <div id="soninfo">まだ作っていません</div>
+  </div>
+
   <div id="downloads"></div>
   <pre id="summary" style="display:none"></pre>
   <div id="log"></div>
@@ -108,6 +135,7 @@
   <script src="js/ORPHE-CORE.js"></script>
   <script src="js/float16.min.js"></script>
   <script src="js/quaternion.js"></script>
+  <script src="js/sonify.js"></script>
 
   <!-- ① 診断だけ（ES5・古いChromeでも必ず動く。ここは絶対落とさない） -->
   <script>
@@ -135,6 +163,7 @@
     };
     let recording = false, recStart = 0, recEnd = 0, wakeLock = null, audioCtx = null;
     const startBeepTs = {}, endBeepTs = {};
+    let playWithRec = false, sonUsed = null;   // 収録中に音を流したか／流した音の素性
     let markers = [];   // 区間マーカー（走る直前/直後に押す）。フラットなイベント列で持つ
     const $ = id => document.getElementById(id);
 
@@ -420,6 +449,156 @@
 
     // ---- 収録 開始 / 停止 ----
     let elapsedTimer = null;
+
+    // ================= 音づくり =================
+    // 試技Aの「区間マーカーで切った範囲」から音を作り、次の試技で流す。
+    // 重い処理（FFT・合成）は試技の合間にここで済ませ、収録中は再生だけにする。
+    // 再生は音声専用スレッドで走るのでBLE受信（本体スレッド）とは干渉しない。
+    const SON_SR = 44100;
+    let sonBuf = null, sonSrc = null, sonMeta = null, sonWav = null, sonMode = 'phase';
+
+    function rangesForSound() {
+      // 対になった区間だけを対象にする（左足優先、無ければ右足）
+      const out = [];
+      for (let i = 0; i + 1 < markers.length; i += 2) {
+        const a = markers[i], b = markers[i + 1];
+        const foot = (a.sensor_ts.left !== null) ? 'left' : 'right';
+        if (a.sensor_ts[foot] === null || b.sensor_ts[foot] === null) continue;
+        out.push({ idx: out.length + 1, foot: foot,
+                   from: a.sensor_ts[foot], to: b.sensor_ts[foot],
+                   t0: a.t_s, t1: b.t_s });
+      }
+      return out;
+    }
+
+    function fillRangeSelect() {
+      const sel = $('sonrange'), rs = rangesForSound();
+      sel.innerHTML = '';
+      rs.forEach(r => {
+        const o = document.createElement('option');
+        o.value = r.idx - 1;
+        o.textContent = `区間${r.idx}  ${r.t0.toFixed(1)}〜${r.t1.toFixed(1)}s  (${(r.t1 - r.t0).toFixed(1)}s・${r.foot})`;
+        sel.appendChild(o);
+      });
+      $('songen').disabled = rs.length === 0;
+      $('sonbar').style.display = rs.length ? 'block' : 'none';
+      if (!rs.length) $('soninfo').textContent = '区間マーカーが無いので作れません';
+    }
+
+    // CSVに積んだ行から、指定区間の gyro_x を200Hzの等間隔で取り出す
+    function gyroSeries(F, fromTs, toTs) {
+      const ts = [], gx = [];
+      const seen = new Map();
+      for (const line of F.rec) {
+        const c = line.split(',');
+        const t = +c[0];
+        const k = seen.get(t) || 0; seen.set(t, k + 1);
+        ts.push(t + k * 5); gx.push(+c[4]);       // 5列目が gyro_x
+      }
+      const grid = [], val = [];
+      let i = 0;
+      for (let x = fromTs; x <= toTs; x += 5) {
+        while (i < ts.length - 2 && ts[i + 1] < x) i++;
+        const span = (ts[i + 1] - ts[i]) || 1;
+        const f = (x - ts[i]) / span;
+        grid.push(x); val.push(gx[i] + (gx[i + 1] - gx[i]) * f);
+      }
+      return val;
+    }
+
+    function makeAudioBuffer(samples) {
+      ensureAudio();
+      const buf = audioCtx.createBuffer(1, samples.length, SON_SR);
+      buf.copyToChannel(samples instanceof Float32Array ? samples : Float32Array.from(samples), 0);
+      return buf;
+    }
+
+    $('songen').onclick = function () {
+      if (recording) { window.__logLine('収録中は音を作りません'); return; }
+      const rs = rangesForSound(), r = rs[+$('sonrange').value];
+      if (!r) return;
+      const F = feet[r.foot === 'left' ? 'L' : 'R'];
+      const cut = parseFloat($('soncut').value), nMult = parseInt($('sonn').value, 10);
+      this.disabled = true; $('soninfo').textContent = '計算中…';
+      setTimeout(function () {                      // 画面を先に更新させてから重い処理へ
+        try {
+          const gyro = gyroSeries(F, r.from, r.to);
+          const an = Sonify.analytic(gyro, 200, cut);
+          const samples = Sonify.renderPhaseSound(an.amp, an.phase, 200, SON_SR, nMult);
+          sonBuf = makeAudioBuffer(samples);
+          sonWav = Sonify.toWavBlob(samples, SON_SR);
+          sonMode = 'phase';
+          // 平均の回転数から一歩の周期を出す（接地検出を使わずに済む）
+          const laps = Math.abs(an.phase[an.phase.length - 1] - an.phase[0]) / (2 * Math.PI);
+          const durS = gyro.length / 200;
+          sonMeta = { range_index: r.idx, foot: r.foot, from_sensor_ts: r.from, to_sensor_ts: r.to,
+                      cutoff_hz: cut, n_mult: nMult, duration_s: +durS.toFixed(3),
+                      laps: +laps.toFixed(2), cycle_s: +(durS / Math.max(laps, 1e-9)).toFixed(3),
+                      sample_rate: SON_SR, mode: 'phase' };
+          const ctr = Math.round(nMult / sonMeta.cycle_s);
+          sonMeta.center_hz = ctr;
+          // 逓倍数Nは可聴域に上げるためだけの定数。区間の周期が変わると中心も動くので確認する。
+          // ★AとBで同じNを使うこと（違うNの音は比べられない）
+          let warn = '';
+          if (ctr < 80) warn = `\n⚠ 低すぎる（${ctr}Hz）。逓倍を ${Math.round(250 * sonMeta.cycle_s / 10) * 10} くらいに上げる`;
+          else if (ctr > 2000) warn = `\n⚠ 高すぎる（${ctr}Hz）。逓倍を ${Math.round(400 * sonMeta.cycle_s / 10) * 10} くらいに下げる`;
+          if (laps < 1.5) warn += `\n⚠ 区間に位相が ${laps.toFixed(1)}周しか入っていない。区間が短すぎるかも`;
+          $('soninfo').textContent =
+            `区間${r.idx}(${r.foot})から生成\n長さ ${durS.toFixed(2)}s  位相 ${laps.toFixed(1)}周  1周 ${sonMeta.cycle_s}s\n` +
+            `ローパス ${cut}Hz  逓倍 ${nMult}  → 中心およそ ${ctr}Hz` + warn +
+            `\n※AとBでは同じ逓倍数を使うこと`;
+          $('sonplay').disabled = false; $('sonmetro').disabled = false;
+          rebuildDownloads();
+        } catch (e) {
+          $('soninfo').textContent = '失敗: ' + (e && e.message ? e.message : e);
+          window.__logLine('音の生成に失敗: ' + (e && e.message ? e.message : e));
+        }
+        $('songen').disabled = false;
+      }, 30);
+    };
+
+    $('sonmetro').onclick = function () {
+      if (!sonMeta) return;
+      const per = sonMeta.cycle_s, dur = sonMeta.duration_s;
+      const samples = Sonify.renderMetronome(per, dur, SON_SR);
+      sonBuf = makeAudioBuffer(samples);
+      sonWav = Sonify.toWavBlob(samples, SON_SR);
+      sonMode = (sonMode === 'metronome') ? 'phase' : 'metronome';
+      if (sonMode === 'phase') { $('songen').click(); return; }   // 元に戻す
+      sonMeta.mode = 'metronome';
+      $('soninfo').textContent = `メトロノーム（対照条件）\n周期 ${per.toFixed(3)}s = ${(60/per).toFixed(1)} bpm  長さ ${dur.toFixed(2)}s`;
+      this.textContent = '♩ 運動の音に戻す';
+      rebuildDownloads();
+    };
+
+    function stopSound() {
+      if (sonSrc) { try { sonSrc.stop(); } catch (e) {} sonSrc = null; }
+      $('sonplay').textContent = '▶ 試聴';
+    }
+    function startSound() {
+      if (!sonBuf) return null;
+      stopSound();
+      sonSrc = audioCtx.createBufferSource();
+      sonSrc.buffer = sonBuf;
+      sonSrc.loop = $('sonloop').checked;
+      sonSrc.connect(audioCtx.destination);
+      sonSrc.start();
+      return sonSrc;
+    }
+    $('sonplay').onclick = function () {
+      ensureAudio();
+      if (sonSrc) { stopSound(); return; }
+      startSound(); this.textContent = '■ 停止';
+      if (sonSrc) sonSrc.onended = function () { $('sonplay').textContent = '▶ 試聴'; };
+    };
+
+    // 出力遅延（命令してから耳に届くまで）。Bluetoothイヤホンだと100〜300ms出る
+    function outputLatencyMs() {
+      if (!audioCtx) return null;
+      const l = (audioCtx.outputLatency !== undefined ? audioCtx.outputLatency : audioCtx.baseLatency);
+      return (l === undefined || l === null) ? null : Math.round(l * 1000);
+    }
+
     // 全画面フラッシュ（動画側の同期マーカー）。色で何のイベントかを見分ける
     const C_FLASH_START = '#16a34a';   // 収録開始＝緑
     const C_FLASH_STOP  = '#dc2626';   // 収録停止＝赤
@@ -440,6 +619,9 @@
       $('rec').style.display = 'none'; $('stop').style.display = ''; $('stop').disabled = false;
       $('downloads').innerHTML = ''; $('summary').style.display = 'none';
       // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
+      playWithRec = $('sonwith').checked && !!sonBuf;
+      sonUsed = playWithRec ? Object.assign({}, sonMeta, {
+        output_latency_ms: outputLatencyMs(), looped: $('sonloop').checked }) : null;
       markers = []; $('mark').disabled = false; renderMarks();
       // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
       $('markbar').style.display = 'block';
@@ -451,6 +633,10 @@
         // このコールバックの直後に上のDOM変更が描画される＝緑が出てボタンが赤に切り替わる瞬間
         recording = true; recStart = Date.now();
         startBeepTs.L = feet.L.lastTs || recStart; startBeepTs.R = feet.R.lastTs || recStart;
+        // ★音ありモード：収録開始と同時に再生を始める。
+        //   こうすると音の0秒＝試技Aの区間の始まり＝試技Bの収録開始 が一致し、
+        //   AとBを後から突き合わせる手続きが要らなくなる。
+        if (playWithRec && sonBuf) { startSound(); $('sonplay').textContent = '■ 停止'; }
         beep(1320, 130);
         setTimeout(function(){ $('flash').style.display = 'none'; }, FLASH_MS);
         requestWakeLock();            // await しない（t=0 を遅らせないため）
@@ -467,6 +653,7 @@
       endBeepTs.L = feet.L.lastTs || recEnd; endBeepTs.R = feet.R.lastTs || recEnd;
       beep(880, 200);
       flash(C_FLASH_STOP, FLASH_MS);   // 停止＝赤のフラッシュ
+      if (playWithRec) stopSound();
       releaseWakeLock();
       clearInterval(elapsedTimer);
       $('stop').style.display = 'none'; $('rec').style.display = ''; updateRecEnabled();
@@ -496,6 +683,7 @@
       }
       $('elapsed').textContent = '';
       buildDownloads();
+      fillRangeSelect();
     };
 
     // ---- CSV / メタ 生成 → ダウンロードボタン（モバイルは手動タップが確実） ----
@@ -552,6 +740,7 @@
         range: { acc: 16, gyro: 2000 },
         markers: markers,
         ranges: pairedRanges(),
+        sonification_played: sonUsed,   // この収録中に流した音（nullなら無音条件）
         note: 'timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
 
         feet: {
@@ -560,6 +749,10 @@
         }
       };
       dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
+      if (sonWav && sonMeta) {
+        dl.appendChild(mkLink(label + '_' + st + '_sound_' + sonMeta.mode + '.wav',
+          '⬇ つくった音 (' + sonMeta.mode + ')', sonWav));
+      }
       const sm = $('summary'); sm.style.display = '';
       const rg = pairedRanges();
       const rgTxt = rg.length
@@ -568,6 +761,8 @@
       sm.textContent = '収録 ' + durS.toFixed(1) + 's  (' + label + '_' + st + ')\n' + info.join('\n') + rgTxt +
                        '\n\n※上のボタンを1つずつタップして保存。\n※CSVは既存の *_sensor.csv と同形式。実験フォルダに置けば compare_all.py / ble_quality_check.py がそのまま読めます。';
     }
+
+    function rebuildDownloads() { if (recEnd) buildDownloads(); }
 
     // ---- ライブ表示 ----
     function render() {
