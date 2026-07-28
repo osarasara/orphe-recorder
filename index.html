@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.3 — 走行データ収録（両足・区間マーカー・時計同期）</title>
+<title>Orphe Recorder v1.4 — 走行データ収録（両足・区間マーカー・時計同期）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -64,7 +64,7 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.3</h1>
+  <h1>Orphe Recorder v1.4</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。音ありモードなら紫で音が鳴り、橙で止まる（1回の収録で何本でも）。全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
 
   <div id="diag">診断中…</div>
@@ -79,7 +79,7 @@
       <button id="connL">接続 左足</button>
       <div class="m"><span>レート</span><b id="hzL">– Hz</b></div>
       <div class="m"><span>サンプル</span><b id="nL">0</b></div>
-      <div class="m"><span>欠損</span><b id="lostL">0</b></div>
+      <div class="m"><span>ロス通知</span><b id="lostL">0</b></div>
       <div class="m"><span>電池</span><b id="batL">–</b></div>
       <div class="m"><span>時計</span><b id="clkL">–</b></div>
     </div>
@@ -89,7 +89,7 @@
       <button id="connR">接続 右足</button>
       <div class="m"><span>レート</span><b id="hzR">– Hz</b></div>
       <div class="m"><span>サンプル</span><b id="nR">0</b></div>
-      <div class="m"><span>欠損</span><b id="lostR">0</b></div>
+      <div class="m"><span>ロス通知</span><b id="lostR">0</b></div>
       <div class="m"><span>電池</span><b id="batR">–</b></div>
       <div class="m"><span>時計</span><b id="clkR">–</b></div>
     </div>
@@ -624,7 +624,8 @@
 
     $('rec').onclick = function () {
       ensureAudio();
-      feet.L.rec = []; feet.R.rec = [];
+      // lost は接続してからの通算だった。収録ごとの値にするためここで0に戻す
+      feet.L.rec = []; feet.R.rec = []; feet.L.lost = 0; feet.R.lost = 0;
       // ★先に画面を変える。t=0 の記録は「その描画が出る直前」に行う。
       //   旧版は await requestWakeLock() を挟んでから画面を変えていたため、
       //   赤が出る瞬間が t=0 より数十ms遅れていた。
@@ -695,6 +696,30 @@
     };
 
     // ---- CSV / メタ 生成 → ダウンロードボタン（モバイルは手動タップが確実） ----
+    // ★データの穴は lost ではなくタイムスタンプの間隔で測る。
+    //   lostData コールバックの回数は再送で埋まったものも数えており、実際の欠落と一致しない
+    //   （2026-07-28、lost=1018 でも 100ms超の穴が0回だった）。
+    function gapStats(F) {
+      const uniq = [];
+      let last = null;
+      for (const line of F.rec) {
+        const t = +line.split(',')[0];
+        if (t !== last) { uniq.push(t); last = t; }
+      }
+      if (uniq.length < 3) return null;
+      uniq.sort((a, b) => a - b);
+      let over100 = 0, over300 = 0, holeMs = 0, maxGap = 0;
+      for (let i = 1; i < uniq.length; i++) {
+        const d = uniq[i] - uniq[i - 1];
+        if (d > maxGap) maxGap = d;
+        if (d > 100) { over100++; holeMs += d; }
+        if (d > 300) over300++;
+      }
+      const spanS = (uniq[uniq.length - 1] - uniq[0]) / 1000;
+      return { over100, over300, maxGap, holeS: holeMs / 1000, spanS,
+               holePct: spanS > 0 ? (holeMs / 1000 / spanS * 100) : 0 };
+    }
+
     function stamp(d) {
       const p = n => String(n).padStart(2,'0');
       return d.getFullYear() + p(d.getMonth()+1) + p(d.getDate()) + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
@@ -711,7 +736,9 @@
       const atConnect = orNull(F.clockOffsetAfter);      // 接続時（syncCoreTime直後）に測った時計のズレ
       const afterRec  = orNull(F.clockOffsetAfterRec);   // 収録の直後に測り直した時計のズレ
       return {
-        connected: F.connected, samples: F.rec.length, lost: F.lost,
+        connected: F.connected, samples: F.rec.length,
+        lost_callbacks: F.lost,   // ライブラリのlostDataが呼ばれた回数。実際の欠落とは一致しない
+        gaps: gapStats(F),        // ★実際の穴。タイムスタンプの間隔から算出（こちらを見る）
         battery: orNull(F.battery), battery_pct: orNull(F.battery_pct),
         clock_offset_at_connect_ms: atConnect,
         clock_offset_after_rec_ms: afterRec,
@@ -739,8 +766,12 @@
         const dr = clockDrift(F);
         const clkTxt = (dr === null) ? '  時計:未測定'
               : ('  時計ずれ' + (dr >= 0 ? '+' : '') + dr + 'ms' + (Math.abs(dr) <= 50 ? '(安定)' : '(⚠動いた)'));
-        info.push(k + ': ' + F.rec.length + '行  ' + hz.toFixed(0) + 'Hz  欠損' + F.lost +
-                  (F.rec.length && (hz<150||F.lost>durS*3) ? '  ⚠要確認' : '  OK') + clkTxt);
+        const g = gapStats(F);
+        const gapTxt = g ? ('  穴' + g.over100 + '回(' + g.holePct.toFixed(1) + '%)  最大' + g.maxGap + 'ms')
+                         : '  穴:計測不可';
+        const bad = F.rec.length && (hz < 150 || (g && g.holePct > 2));
+        info.push(k + ': ' + F.rec.length + '行  ' + hz.toFixed(0) + 'Hz' + gapTxt +
+                  (bad ? '  ⚠要確認' : '  OK') + clkTxt);
       });
       const meta = {
         label: label, stamp: st,
@@ -779,7 +810,7 @@
         const hzEl = $('hz'+k); hzEl.textContent = (F.connected ? hz : '–') + ' Hz';
         hzEl.className = (F.connected && F.n>0 && hz<150) ? 'warn' : '';
         $('n'+k).textContent = recording ? F.rec.length : F.n;
-        const lEl = $('lost'+k); lEl.textContent = F.lost; lEl.className = F.lost>0 ? 'warn' : '';
+        const lEl = $('lost'+k); lEl.textContent = F.lost; lEl.className = '';   // 実害の指標ではないので赤くしない
       });
       requestAnimationFrame(render);
     }
