@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.6 — 走行データ収録（両足・区間マーカー・4条件の進行）</title>
+<title>Orphe Recorder v1.7 — 走行データ収録（両足・区間マーカー・4条件の進行）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -80,7 +80,7 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.6</h1>
+  <h1>Orphe Recorder v1.7</h1>
   <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。<b>試技Aから音をつくると4条件（無音／自分の音／メトロノーム／凍らせた音）が揃い、順序はアプリが決めて紫を押すだけで切り替わる。</b>全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
 
   <div id="diag">診断中…</div>
@@ -125,7 +125,10 @@
     <div id="plannext" class="done">条件の進行はまだ始まっていません</div>
     <button id="mark">▶ 区間 開始</button>
     <button id="undo" class="ghost">↩ 直前のマーカーを取り消し</button>
-    <input type="text" id="felt" placeholder="直前の試技の一言（任意・あとで消えません）" autocomplete="off">
+    <div class="row2">
+      <input type="text" id="felt" placeholder="直前の試技の一言（任意）" autocomplete="off">
+      <input type="number" id="taskerr" step="0.5" placeholder="課題の誤差 cm（例 踏切 +3 / −7）" autocomplete="off">
+    </div>
     <div id="marks">マーカーなし</div>
   </div>
 
@@ -145,7 +148,8 @@
       <button id="playfrozen" class="util" disabled>🔒 凍らせた音</button>
       <button id="playstop" class="util" disabled>■ 停止</button>
     </div>
-    <label class="chk"><input type="checkbox" id="sonloop" checked> くり返し再生する</label>
+    <label class="chk"><input type="checkbox" id="sonloop"> くり返し再生する
+      <span style="font-size:.75rem;color:#888">（なぞりでは切る。繰り返すと「1本ぶんの自分」でなくなる）</span></label>
     <div id="soninfo">まだ作っていません</div>
   </div>
 
@@ -487,7 +491,8 @@
       }
       const lines = plan.map((p, i) => {
         const head = (i === planIdx) ? '▶' : (p.done ? '✓' : ' ');
-        const felt = p.felt ? '  「' + p.felt + '」' : '';
+        const err = (p.task_error_cm === undefined || p.task_error_cm === null) ? '' : `  ${p.task_error_cm > 0 ? '+' : ''}${p.task_error_cm}cm`;
+        const felt = (p.felt ? '  「' + p.felt + '」' : '') + err;
         return `${head} ${String(i+1).padStart(2,' ')} B${p.block} ${COND[p.cond].mark} ${COND[p.cond].label}` +
                (p.range_index ? `  区間${p.range_index}` : '') + felt;
       });
@@ -559,7 +564,7 @@
         }
         mk.sound_playing = played;                 // 実際に鳴った音（鳴らなければ null）
         // 一言の入力欄は次の試技に入った時点でクリアする（前の試技のぶんは plan 側に残っている）
-        $('felt').value = ''; feltTarget = null;
+        $('felt').value = ''; $('taskerr').value = ''; feltTarget = null;
       } else {
         stopSound();
         const a = markers[markers.length - 2];
@@ -589,15 +594,24 @@
       renderMarks();
     };
     // ⭐体感の一言。体感は主要証拠から降ろしたが、記録は取り続ける（載せるかは後で決められる）
-    $('felt').oninput = function () {
-      const v = this.value.trim();
-      if (feltTarget !== null && plan && plan[feltTarget]) { plan[feltTarget].felt = v; renderPlan(); }
-      // 進行を使っていない場合は、直前に閉じた区間の開始マーカーに書く
-      else {
-        for (let i = markers.length - 1; i >= 0; i--) {
-          if (markers[i].kind === 'start' && markers[i + 1]) { markers[i].felt = v; break; }
-        }
+    // ★課題の誤差（踏切位置のズレなど）は数値で残す。これが課題変数になる。
+    //   拘束式（各歩の歩幅の和＝助走距離）からの外れ＝「悪いばらつき」に対応するので、
+    //   自由記述に埋めず、解析からそのまま読める形にしておく。
+    // ★plan と marker の両方に書く。
+    //   plan は画面表示のため、marker は meta の ranges[] に載せるため。
+    //   v1.6 では plan にだけ書いていて、進行係を使うと ranges[].felt が
+    //   常に null になっていた（解析側は ranges を見るので、そこに無いと届かない）。
+    function writeBack(key, v) {
+      if (feltTarget !== null && plan && plan[feltTarget]) { plan[feltTarget][key] = v; renderPlan(); }
+      // 直前に閉じた区間の開始マーカーにも書く
+      for (let i = markers.length - 1; i >= 0; i--) {
+        if (markers[i].kind === 'start' && markers[i + 1]) { markers[i][key] = v; break; }
       }
+    }
+    $('felt').oninput = function () { writeBack('felt', this.value.trim()); };
+    $('taskerr').oninput = function () {
+      const n = parseFloat(this.value);
+      writeBack('task_error_cm', Number.isFinite(n) ? n : null);
     };
 
     // 対になったマーカーだけを区間に畳む（末尾が開きっぱなしなら収録終了で閉じる）
@@ -613,6 +627,7 @@
           condition: a.condition || null,         // ★解析はこれで条件を割る（silent/phase/metronome/frozen）
           sound_playing: a.sound_playing || null, // 実際に鳴った音。conditionと食い違っていたら音が用意できていなかった
           felt: a.felt || null,                   // 体感の一言（任意）
+          task_error_cm: (a.task_error_cm === undefined ? null : a.task_error_cm), // ★課題の誤差（踏切位置のズレ等）
           start_epoch_ms: a.epoch_ms,
           end_epoch_ms: b ? b.epoch_ms : recEnd
         });
@@ -829,7 +844,7 @@
       //   赤が出る瞬間が t=0 より数十ms遅れていた。
       $('rec').style.display = 'none'; $('stop').style.display = ''; $('stop').disabled = false;
       $('downloads').innerHTML = ''; $('summary').style.display = 'none';
-      markers = []; feltTarget = null; $('felt').value = '';
+      markers = []; feltTarget = null; $('felt').value = ''; $('taskerr').value = '';
       $('mark').disabled = false; renderMarks(); renderPlan();
       // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
       $('markbar').style.display = 'block';
@@ -979,12 +994,13 @@
           made: planSeed,
           conditions: Object.keys(COND).reduce((o,k) => (o[k] = COND[k].label, o), {}),
           order: plan.map((p, i) => ({ n: i + 1, block: p.block, condition: p.cond,
-                                       done: p.done, range_index: p.range_index, felt: p.felt || null })),
+                                       done: p.done, range_index: p.range_index, felt: p.felt || null,
+                                       task_error_cm: (p.task_error_cm === undefined ? null : p.task_error_cm) })),
           progress: planIdx + ' / ' + plan.length
         } : null,
         sonification: sonSet ? Object.assign({}, sonMeta, {
           output_latency_ms: outputLatencyMs(), looped: $('sonloop').checked }) : null,
-        note: '★条件（v1.6〜）：条件は収録単位ではなく区間単位。ranges[].condition が silent(無音)/phase(自分の音)/metronome(メトロノーム)/frozen(凍らせた音=運動の音の時間反転) のどれか。null は進行係を使わずに録った区間。ranges[].sound_playing は実際に鳴った音で、condition と食い違っていたらその条件の音が用意できていなかった（＝その試技は使えない）。condition_plan.order が事前に決めた順序（ブロック内ランダム化＝1ブロックに全条件を1回ずつ）で、done/range_index が実際にやった記録。ranges[].felt は体感の一言（任意）。sonification が3条件共通の音の素性（同じ区間・同じ逓倍数Nから派生させているので条件間で長さ・ケイデンス・音量が揃っている）。 / timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
+        note: '★条件（v1.7〜）：条件は収録単位ではなく区間単位。ranges[].condition が silent(無音)/phase(自分の音)/metronome(メトロノーム)/frozen(凍らせた音=運動の音の時間反転) のどれか。null は進行係を使わずに録った区間。ranges[].sound_playing は実際に鳴った音で、condition と食い違っていたらその条件の音が用意できていなかった（＝その試技は使えない）。condition_plan.order が事前に決めた順序（ブロック内ランダム化＝1ブロックに全条件を1回ずつ）で、done/range_index が実際にやった記録。ranges[].felt は体感の一言（任意）。★ranges[].task_error_cm は課題の誤差[cm]（助走なら踏切位置のズレ。＋が奥、−が手前）＝課題変数。拘束式（各歩の歩幅の和＝助走距離）からの外れ＝悪いばらつきに対応する。sonification が3条件共通の音の素性（同じ区間・同じ逓倍数Nから派生させているので条件間で長さ・ケイデンス・音量が揃っている）。 / timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
 
         feet: {
           left:  footMeta(feet.L, startBeepTs.L, endBeepTs.L),
@@ -1007,6 +1023,7 @@
             '  ' + r.index + ') ' + r.start_s.toFixed(1) + '-' + r.end_s.toFixed(1) + 's' + (r.closed ? '' : '*') +
             (r.condition ? '  ' + COND[r.condition].mark + COND[r.condition].label : '  条件なし') +
             (r.condition && COND[r.condition].needsSound && r.sound_playing !== r.condition ? '  ⚠音が鳴っていない' : '') +
+            (r.task_error_cm !== null && r.task_error_cm !== undefined ? `  ${r.task_error_cm > 0 ? '+' : ''}${r.task_error_cm}cm` : '') +
             (r.felt ? '  「' + r.felt + '」' : '')
           ).join('\n')
         : '\n区間マーカーなし（全区間が解析対象）';

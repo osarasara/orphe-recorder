@@ -154,6 +154,44 @@ T.addMarker();
 check('silent 条件では鳴らさない', sandbox.__played === null, String(sandbox.__played));
 check('silent の sound_playing は null', T.markers[2].sound_playing === null);
 
+// ================= 7. 課題の誤差（踏切位置のズレ） =================
+console.log('\n[ 課題の誤差が数値で残るか ]');
+T.plan = T.makePlan(1, true); T.planIdx = 0; T.markers = []; T.sonSet = null;
+T.recording = true; T.recStart = Date.now();
+T.addMarker(); T.addMarker();                 // 1本やって閉じる
+$('taskerr').value = '-7.5';
+$('taskerr').oninput.call($('taskerr'));
+check('負の値が数値で入る', T.plan[0].task_error_cm === -7.5, T.plan[0].task_error_cm);
+$('felt').value = '詰まった';
+$('felt').oninput.call($('felt'));
+check('一言と併存する', T.plan[0].felt === '詰まった' && T.plan[0].task_error_cm === -7.5);
+$('taskerr').value = 'abc';
+$('taskerr').oninput.call($('taskerr'));
+check('数値でなければ null', T.plan[0].task_error_cm === null, String(T.plan[0].task_error_cm));
+$('taskerr').value = '3';
+$('taskerr').oninput.call($('taskerr'));
+T.addMarker();                                 // 次の紫でクリアされる
+check('次の試技に入ると入力欄が空になる', $('taskerr').value === '' && $('felt').value === '');
+check('前の試技の値は残っている', T.plan[0].task_error_cm === 3);
+T.addMarker(); T.recEnd = Date.now();
+const rr = T.pairedRanges();
+check('ranges に task_error_cm が載る', rr[0].task_error_cm === 3, rr[0].task_error_cm);
+check('未入力の試技は null', rr[1].task_error_cm === null, String(rr[1].task_error_cm));
+// ================= 8. v1.6の不具合の再発防止 =================
+// 進行係を使っているとき、体感の一言が ranges[] に載っていなかった。
+// 解析側は ranges を見るので、plan にだけ書いていると届かない。
+console.log('\n[ 進行係ありでも ranges に届くか（v1.6の不具合の再発防止） ]');
+T.plan = T.makePlan(1, false); T.planIdx = 0; T.markers = []; T.sonSet = null;
+T.recording = true; T.recStart = Date.now();
+T.addMarker(); T.addMarker();
+$('felt').value = '軽かった'; $('felt').oninput.call($('felt'));
+$('taskerr').value = '2.5'; $('taskerr').oninput.call($('taskerr'));
+T.recEnd = Date.now();
+const r8 = T.pairedRanges();
+check('進行係ありでも ranges[].felt が入る', r8[0].felt === '軽かった', JSON.stringify(r8[0].felt));
+check('進行係ありでも ranges[].task_error_cm が入る', r8[0].task_error_cm === 2.5, r8[0].task_error_cm);
+check('plan 側にも残っている（画面表示用）', T.plan[0].felt === '軽かった' && T.plan[0].task_error_cm === 2.5);
+
 console.log('\n' + (fail === 0 ? '✓ すべて通過' : '✗ ' + fail + ' 件 失敗'));
 if (sandbox.__logs.length) console.log('\n(アプリのログ)\n  ' + sandbox.__logs.join('\n  '));
 process.exit(fail === 0 ? 0 : 1);
