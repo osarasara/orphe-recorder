@@ -147,6 +147,17 @@
     return fadeEnds(normalize(out, 0.89), sr);
   }
 
+  // ---- 対照条件：凍らせた音（時間反転） ----
+  // 運動の音をそのまま逆再生する。振幅の分布・ケイデンス・音色・音の豊かさは
+  // 統計的にほぼ同一のまま、「今の運動との瞬間ごとの対応」だけが壊れる。
+  // ＝ yoked control。「音があったから変わった」と「"自分の"音だったから変わった」を分ける。
+  // 他人や別日の音を使う案は採らない（それは"手本"になってしまい設計の原則に触る）。
+  function renderFrozen(samples) {
+    const n = samples.length, out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = samples[n - 1 - i];
+    return out;   // 元の音は両端に30msのフェードが入っているので、反転しても端は無音のまま
+  }
+
   // ---- 対照条件：メトロノーム（平均ケイデンスでクリック） ----
   function renderMetronome(periodS, durS, sr) {
     const out = new Float32Array(Math.floor(durS * sr));
@@ -190,7 +201,7 @@
   }
 
   global.Sonify = {
-    analytic, renderPhaseSound, renderMetronome, toWavBlob,
+    analytic, renderPhaseSound, renderMetronome, renderFrozen, toWavBlob,
     butterLowpass, filtfilt, hilbertImag, nextPow2
   };
 })(typeof window !== 'undefined' ? window : globalThis);
