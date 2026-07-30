@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.8 — 走行データ収録（両足・区間マーカー・4条件の進行）</title>
+<title>Orphe Recorder v1.9 — 走行データ収録（両足・区間マーカー・4条件の進行・一括保存）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -37,9 +37,25 @@
   #markbar { display:none; margin: 4px 0 10px; }
   button#mark { font-size: 1.5rem; font-weight: 700; padding: 30px 18px; background: #7c3aed; }
   button#mark.ending { background: #ea580c; }
+  button#mark.stale { background: #b91c1c; }   /* データが来ていない＝押しても意味がない状態 */
   button#undo { font-size: .9rem; padding: 9px 14px; }
   #marks { font-family: ui-monospace, monospace; font-size: .82rem; white-space: pre-wrap;
            background: rgba(124,58,237,.13); border-radius: 10px; padding: 8px 12px; margin-top: 8px; min-height: 1.2em; }
+  /* ★未保存の警告。走った直後にスマホを見て一目で分かる必要があるので、
+     控えめにせず画面上部に貼り付けて赤く出し続ける */
+  #unsaved {
+    display: none; position: sticky; top: 0; z-index: 50;
+    margin: 0 0 10px; padding: 10px 12px; border-radius: 8px;
+    background: #b91c1c; color: #fff; font-weight: 700; font-size: .95rem;
+    line-height: 1.5; text-align: center;
+  }
+  #zipwrap { margin-top: 12px; }
+  #zipwrap button {
+    width: 100%; padding: 16px; font-size: 1.05rem; font-weight: 700;
+    background: #15803d; color: #fff; border: 0; border-radius: 10px;
+  }
+  #zipwrap button:disabled { background: #999; }
+  #zipnote { font-size: .78rem; color: #888; margin-top: 6px; text-align: center; line-height: 1.5; }
   #downloads { margin-top: 12px; }
   #downloads a { display:block; text-align:center; text-decoration:none; }
   #summary { font-family: ui-monospace, monospace; font-size:.78rem; white-space:pre-wrap;
@@ -80,8 +96,10 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.8</h1>
-  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。<b>試技Aから音をつくると4条件（無音／自分の音／メトロノーム／凍らせた音）が揃い、順序はアプリが決めて紫を押すだけで切り替わる。</b>全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。</p>
+  <h1>Orphe Recorder v1.9</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。<b>試技Aから音をつくると4条件（無音／自分の音／メトロノーム／凍らせた音）が揃い、順序はアプリが決めて紫を押すだけで切り替わる。</b>全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。<br><b>v1.9：収録が終わったら緑の「全部まとめて保存（ZIP）」を1タップ。保存するまで上に赤い警告が出続け、未保存のまま次を始めようとすると止まる。センサのデータが来ていないと紫は押せない。</b></p>
+
+  <div id="unsaved"></div>
 
   <div id="diag">診断中…</div>
 
@@ -167,6 +185,10 @@
     <div id="planlist">まだ順序をつくっていません</div>
   </div>
 
+  <div id="zipwrap" style="display:none">
+    <button id="zipsave">⬇ 全部まとめて保存（ZIP）</button>
+    <div id="zipnote"></div>
+  </div>
   <div id="downloads"></div>
   <pre id="summary" style="display:none"></pre>
   <div id="log"></div>
@@ -177,6 +199,7 @@
   <script src="js/float16.min.js"></script>
   <script src="js/quaternion.js"></script>
   <script src="js/sonify.js"></script>
+  <script src="js/zip.js"></script>
 
   <!-- ① 診断だけ（ES5・古いChromeでも必ず動く。ここは絶対落とさない） -->
   <script>
@@ -199,8 +222,10 @@
     const CSV_HEADER = 'timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,quat_x,quat_y,quat_z,quat_w';
     // 既存データと同じスケールで残す: acc/gyro=正規化値(解析側で ×16 / ×2000)、quat=生int16、timestamp=デバイス時刻(PC時計に同期)
     const feet = {
-      L: { key:'L', id:0, core:null, connected:false, rec:[], n:0, lost:0, rateWin:[], lastTs:0 },
-      R: { key:'R', id:1, core:null, connected:false, rec:[], n:0, lost:0, rateWin:[], lastTs:0 },
+      // lastTs=シューズ時計での最後のサンプル時刻 / lastRecvMs=それが届いたスマホ時計の時刻。
+      // ★鮮度の判定には lastRecvMs を使う。lastTs はシューズ時計なのでオフセットが混ざる。
+      L: { key:'L', id:0, core:null, connected:false, rec:[], n:0, lost:0, rateWin:[], lastTs:0, lastRecvMs:0 },
+      R: { key:'R', id:1, core:null, connected:false, rec:[], n:0, lost:0, rateWin:[], lastTs:0, lastRecvMs:0 },
     };
     let recording = false, recStart = 0, recEnd = 0, wakeLock = null, audioCtx = null;
     const startBeepTs = {}, endBeepTs = {};
@@ -211,7 +236,7 @@
     // ---- サンプル受信（gotGyro時点で core.acc / core.quat も同一サンプル値） ----
     function onSample(F) {
       const c = F.core, ts = (c.gyro && c.gyro.timestamp) ? c.gyro.timestamp : Date.now();
-      F.n++; F.lastTs = ts;
+      F.n++; F.lastTs = ts; F.lastRecvMs = Date.now();
       const now = performance.now();
       F.rateWin.push(now);
       while (F.rateWin.length && F.rateWin[0] < now - 1000) F.rateWin.shift();
@@ -259,6 +284,62 @@
     function updateRecEnabled() {
       $('rec').disabled = recording || !(feet.L.connected || feet.R.connected);
     }
+
+    /* ══════ データの鮮度（②③のもと） ══════
+       2026-07-30の実験で、3本目がセンサ0行のまま録れていた。BLEが切れていても
+       画面は「収録中」に見えるので、走り終わるまで気づけなかった。さらに紫と橙の
+       sensor_ts が同じ値になっていた（lastTs が更新されないので同じ古い値が入る）。
+       ＝データが来ていないことは、押す前に分かるはずだった。
+
+       判定はスマホ時計で測る（lastRecvMs）。シューズ時計（lastTs）は
+       オフセットが混ざるので鮮度の判定には使えない。 */
+    const STALE_MS = 800;      // これ以上サンプルが来ていなければ「止まっている」
+    const OVERRIDE_MS = 4000;  // 警告を出してからこの間にもう一度押したら通す
+
+    /** つながっている足のうち、いちばん新しいサンプルの古さ[ms]。1足も繋がっていなければ null */
+    function dataAgeMs() {
+      let best = null;
+      for (const k of ['L','R']) {
+        const F = feet[k];
+        if (!F.connected) continue;
+        const age = F.lastRecvMs ? (Date.now() - F.lastRecvMs) : Infinity;
+        if (best === null || age < best) best = age;
+      }
+      return best;
+    }
+    function dataStale() { const a = dataAgeMs(); return a === null || a > STALE_MS; }
+
+    /* ══════ 未保存の見張り（②） ══════
+       2026-07-30に5本ぶんのデータを失った。原因は単純で、保存ボタンを押していない。
+       1回の収録で5〜6ファイルあり、走った直後に1つずつタップする作りだったので、
+       次の1本に気が向いた瞬間に落ちる。
+       そこで「保存し終わるまで消えない赤いバナー」と「未保存のまま次を始めさせない」の
+       2つで止める。保存の手数そのものは①のZIPで1回に減らす。 */
+    let unsaved = false;          // 保存を待っているデータがあるか
+    let pendingFiles = [];        // [{name, blob}] ZIPにも個別リンクにも同じものを使う
+    const savedNames = new Set(); // 個別リンクでタップし終えたファイル名
+
+    function renderUnsaved() {
+      const el = $('unsaved');
+      if (!unsaved) { el.style.display = 'none'; el.textContent = ''; return; }
+      const left = pendingFiles.filter(f => !savedNames.has(f.name)).length;
+      el.style.display = 'block';
+      el.textContent = '⚠ まだ保存していません（残り ' + left + ' ファイル）\n下の緑のボタンを押してください';
+    }
+    /** 全部そろったら未保存を解除する */
+    function checkAllSaved() {
+      if (unsaved && pendingFiles.length && pendingFiles.every(f => savedNames.has(f.name))) {
+        unsaved = false;
+        window.__logLine('保存できた（' + pendingFiles.length + 'ファイル）');
+      }
+      renderUnsaved();
+    }
+    // ページを閉じる・再読み込みするときも止める（保存前のリロードでも失う）
+    window.addEventListener('beforeunload', function (e) {
+      if (!unsaved) return;
+      e.preventDefault(); e.returnValue = '';   // 文言はブラウザが決める
+      return '';
+    });
 
     // ---- ビープ（Web Audio）----
     function ensureAudio() {
@@ -550,14 +631,42 @@
       }
       $('marks').textContent = lines.join('\n');
     }
+    let staleWarnedAt = 0;   // 「データが来ていません」を出した時刻（押し直しの猶予を測る）
+
     function addMarker() {
       if (!recording) return;
-      const now = Date.now(), kind = nextKind();
+      const kind0 = nextKind();
+      const age = dataAgeMs();
+      // ★③ データが来ていないあいだは紫を押させない。
+      //   橙は止めない。止めると区間の終わりが記録できず、そのぶんまで失う。
+      //   ただし締め出しはしない：もう一度押したら通す（記録に残す）。
+      //   実験中に自分のアプリに邪魔されるのがいちばん困る。
+      if (kind0 === 'start' && dataStale()) {
+        const now0 = Date.now();
+        if (now0 - staleWarnedAt > OVERRIDE_MS) {
+          staleWarnedAt = now0;
+          flash('#b91c1c', 400);
+          beep(220, 300);
+          if (navigator.vibrate) { try { navigator.vibrate([120,80,120,80,120]); } catch(e){} }
+          $('plannext').textContent = '⛔ センサのデータが来ていません（' +
+            (age === null ? '未接続' : (age === Infinity ? '1つも届いていない' : Math.round(age) + 'ms前')) +
+            '）。接続を直すか、もう一度押すとこのまま進みます';
+          $('plannext').className = 'warn';
+          window.__logLine('紫を止めた：データが古い（' + (age === null ? '未接続' : age + 'ms') + '）');
+          return;
+        }
+        window.__logLine('⚠ データが古いまま紫を通した（' + (age === null ? '未接続' : age + 'ms') + '）');
+      }
+      staleWarnedAt = 0;
+      const now = Date.now(), kind = kind0;
       markers.push({
         n: markers.length + 1, kind: kind,
         epoch_ms: now, t_s: (now - recStart) / 1000,
         // ★CSVと同じ時計（シューズ側）での時刻。切り出しにはこちらを使う
-        sensor_ts: { left: feet.L.lastTs || null, right: feet.R.lastTs || null }
+        sensor_ts: { left: feet.L.lastTs || null, right: feet.R.lastTs || null },
+        // ★押した瞬間にサンプルがどれだけ古かったか[ms]。大きい区間は切り出しがずれる。
+        //   null は1足も繋がっていない、非常に大きい値は1つも届いていない。
+        data_age_ms: (age === null ? null : (age === Infinity ? -1 : Math.round(age)))
       });
       const mk = markers[markers.length - 1];
       // ★紫（区間開始）で再生、橙（区間終了）で停止。
@@ -589,6 +698,7 @@
           renderPlan();
         }
       }
+      renderPlan();   // ⛔の警告文を消して通常の表示に戻す
       beep(kind === 'start' ? 1760 : 990, 70);   // 収録開始/停止のビープとは別の短い音
       if (navigator.vibrate) { try { navigator.vibrate(kind === 'start' ? 40 : [30,40,30]); } catch(e){} }
       flash(kind === 'start' ? '#7c3aed' : '#ea580c', 120);   // 動画でも押した瞬間が見える
@@ -846,6 +956,16 @@
     }
 
     $('rec').onclick = function () {
+      // ★② 未保存のまま次の収録を始めさせない。始めた瞬間に前のデータは消える
+      //   （feet.*.rec を空にするので、確認を後ろに置いても手遅れ）。
+      if (unsaved) {
+        const left = pendingFiles.filter(f => !savedNames.has(f.name)).length;
+        const ok = confirm('⚠ 前の収録をまだ保存していません（残り ' + left + ' ファイル）。\n' +
+                           'このまま始めると前のデータは消えます。\n\n本当に捨てて次を始めますか？');
+        if (!ok) return;
+        window.__logLine('未保存のまま次の収録へ（' + left + 'ファイルを捨てた）');
+        unsaved = false; pendingFiles = []; savedNames.clear(); renderUnsaved();
+      }
       ensureAudio();
       // lost は接続してからの通算だった。収録ごとの値にするためここで0に戻す
       feet.L.rec = []; feet.R.rec = []; feet.L.lost = 0; feet.R.lost = 0;
@@ -854,6 +974,7 @@
       //   赤が出る瞬間が t=0 より数十ms遅れていた。
       $('rec').style.display = 'none'; $('stop').style.display = ''; $('stop').disabled = false;
       $('downloads').innerHTML = ''; $('summary').style.display = 'none';
+      $('zipwrap').style.display = 'none';
       markers = []; feltTarget = null; $('felt').value = ''; $('taskerr').value = '';
       $('mark').disabled = false; renderMarks(); renderPlan();
       // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
@@ -948,6 +1069,8 @@
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = name;
       const b = document.createElement('button'); b.className = 'ghost'; b.textContent = text;
+      // 1つずつ保存する道も残しておく。タップしたぶんは未保存から外す
+      a.addEventListener('click', function () { savedNames.add(name); checkAllSaved(); });
       a.appendChild(b); return a;
     }
     // 1足ぶんのメタ。長い三項演算子をインラインで並べると読めなくなるので関数に出す
@@ -975,13 +1098,17 @@
       const st = stamp(new Date(recStart));
       const durS = (recEnd - recStart)/1000;
       const dl = $('downloads'); dl.innerHTML = '';
+      // ★①一括保存のため、まず「何を保存すべきか」の一覧を作る。
+      //   個別リンクもZIPもこの同じ一覧から作るので、片方だけ漏れることがない。
+      pendingFiles = []; savedNames.clear();
+      const add = (name, text, blob) => { pendingFiles.push({ name: name, blob: blob, text: text }); };
       const info = [];
       ['L','R'].forEach(function(k){
         const F = feet[k], side = k==='L' ? 'left' : 'right';
         if (!F.connected && F.rec.length === 0) return;
         const csv = CSV_HEADER + '\n' + F.rec.join('\n') + '\n';
         const fname = label + '_' + st + '_' + side + '_sensor.csv';
-        dl.appendChild(mkLink(fname, '⬇ ' + (k==='L'?'左足':'右足') + ' CSV (' + F.rec.length + '行)', new Blob([csv], {type:'text/csv'})));
+        add(fname, '⬇ ' + (k==='L'?'左足':'右足') + ' CSV (' + F.rec.length + '行)', new Blob([csv], {type:'text/csv'}));
         const hz = F.rec.length && durS>0 ? (F.rec.length/durS) : 0;
         const dr = clockDrift(F);
         const clkTxt = (dr === null) ? '  時計:未測定'
@@ -1010,22 +1137,37 @@
         } : null,
         sonification: sonSet ? Object.assign({}, sonMeta, {
           output_latency_ms: outputLatencyMs(), looped: $('sonloop').checked }) : null,
-        note: '★条件（v1.8〜）：条件は収録単位ではなく区間単位。ranges[].condition が silent(無音)/phase(自分の音)/metronome(メトロノーム)/frozen(凍らせた音=運動の音の時間反転) のどれか。null は進行係を使わずに録った区間。ranges[].sound_playing は実際に鳴った音で、condition と食い違っていたらその条件の音が用意できていなかった（＝その試技は使えない）。condition_plan.order が事前に決めた順序（ブロック内ランダム化＝1ブロックに全条件を1回ずつ）で、done/range_index が実際にやった記録。ranges[].felt は体感の一言（任意）。★ranges[].task_error_cm は課題の誤差[cm]（助走なら踏切位置のズレ。＋が奥、−が手前）＝課題変数。拘束式（各歩の歩幅の和＝助走距離）からの外れ＝悪いばらつきに対応する。sonification が3条件共通の音の素性（同じ区間・同じ逓倍数Nから派生させているので条件間で長さ・ケイデンス・音量が揃っている）。 / timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
+        note: '★条件（v1.8〜）：条件は収録単位ではなく区間単位。ranges[].condition が silent(無音)/phase(自分の音)/metronome(メトロノーム)/frozen(凍らせた音=運動の音の時間反転) のどれか。null は進行係を使わずに録った区間。ranges[].sound_playing は実際に鳴った音で、condition と食い違っていたらその条件の音が用意できていなかった（＝その試技は使えない）。condition_plan.order が事前に決めた順序（ブロック内ランダム化＝1ブロックに全条件を1回ずつ）で、done/range_index が実際にやった記録。ranges[].felt は体感の一言（任意）。★markers[].data_age_ms は、そのマーカーを押した瞬間にセンサの最後のサンプルが何ms前だったか（スマホ時計で測った受信の古さ）。0〜十数msが正常。大きい区間は sensor_ts が古い値で止まっているので切り出しがずれる。null は1足も繋がっていない、−1は1サンプルも届いていない＝その区間は使えない。v1.9からは800msを超えると紫が止まるので、大きい値が残っているのは警告を承知で通した区間。★ranges[].task_error_cm は課題の誤差[cm]（助走なら踏切位置のズレ。＋が奥、−が手前）＝課題変数。拘束式（各歩の歩幅の和＝助走距離）からの外れ＝悪いばらつきに対応する。sonification が3条件共通の音の素性（同じ区間・同じ逓倍数Nから派生させているので条件間で長さ・ケイデンス・音量が揃っている）。 / timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
 
         feet: {
           left:  footMeta(feet.L, startBeepTs.L, endBeepTs.L),
           right: footMeta(feet.R, startBeepTs.R, endBeepTs.R),
         }
       };
-      dl.appendChild(mkLink(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'})));
+      add(label + '_' + st + '_meta.json', '⬇ meta.json（同期・品質）', new Blob([JSON.stringify(meta,null,2)], {type:'application/json'}));
       // 聴いた音そのものが唯一の実体なので、3条件ぶんすべて残す
       if (sonSet && sonMeta) {
         ['phase','frozen','metronome'].forEach(function (k) {
           if (!sonSet[k]) return;
-          dl.appendChild(mkLink(label + '_' + st + '_sound_' + k + '.wav',
-            '⬇ ' + COND[k].mark + ' ' + COND[k].label + ' の wav', sonSet[k].wav));
+          add(label + '_' + st + '_sound_' + k + '.wav',
+            '⬇ ' + COND[k].mark + ' ' + COND[k].label + ' の wav', sonSet[k].wav);
         });
       }
+      // ★ZIPを先に、大きく出す。個別リンクはその下（使わなくてよい道）。
+      zipName = label + '_' + st + '.zip';
+      const totalKB = pendingFiles.reduce((t, f) => t + f.blob.size, 0) / 1024;
+      $('zipwrap').style.display = pendingFiles.length ? '' : 'none';
+      $('zipsave').disabled = false;
+      $('zipsave').textContent = '⬇ 全部まとめて保存（ZIP・' + pendingFiles.length + 'ファイル）';
+      $('zipnote').textContent = zipName + '  約' + totalKB.toFixed(0) + 'KB\n' +
+        '（1タップで全部落ちる。下の1つずつのボタンは使わなくてよい）';
+      pendingFiles.forEach(f => dl.appendChild(mkLink(f.name, f.text, f.blob)));
+
+      // 中身のある収録だけ「未保存」にする。0行のときに赤を出しても意味がない
+      const anyRows = feet.L.rec.length > 0 || feet.R.rec.length > 0;
+      unsaved = anyRows && pendingFiles.length > 0;
+      renderUnsaved();
+
       const sm = $('summary'); sm.style.display = '';
       const rg = pairedRanges();
       const rgTxt = rg.length
@@ -1038,8 +1180,41 @@
           ).join('\n')
         : '\n区間マーカーなし（全区間が解析対象）';
       sm.textContent = '収録 ' + durS.toFixed(1) + 's  (' + label + '_' + st + ')\n' + info.join('\n') + rgTxt +
-                       '\n\n※上のボタンを1つずつタップして保存。\n※CSVは既存の *_sensor.csv と同形式。実験フォルダに置けば compare_all.py / ble_quality_check.py がそのまま読めます。';
+                       '\n\n※緑の「全部まとめて保存（ZIP）」を1タップ。\n※CSVは既存の *_sensor.csv と同形式。実験フォルダに置けば compare_all.py / ble_quality_check.py がそのまま読めます。';
     }
+
+    let zipName = 'run.zip';
+
+    /* ★① 一括保存。走った直後にタップするのは「1回」だけにする。
+       複数ファイルを連続でダウンロードさせるとブラウザに止められることがあるので、
+       1ファイルにまとめてから落とす。無圧縮なので大きさはほぼ元のまま（js/zip.js）。 */
+    $('zipsave').onclick = async function () {
+      if (!pendingFiles.length) return;
+      const btn = $('zipsave');
+      btn.disabled = true; btn.textContent = 'まとめています…';
+      try {
+        const files = [];
+        for (const f of pendingFiles) {
+          files.push({ name: f.name, bytes: new Uint8Array(await f.blob.arrayBuffer()) });
+        }
+        const bytes = Zip.zip(files);
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+        a.download = zipName;
+        a.click();
+        // 落ちたら未保存を解除する（個別リンクぶんもまとめて済み扱いにする）
+        pendingFiles.forEach(f => savedNames.add(f.name));
+        unsaved = false; renderUnsaved();
+        btn.textContent = '✓ 保存した（' + zipName + '）';
+        btn.disabled = true;
+        window.__logLine('ZIPで保存：' + zipName + '（' + files.length + 'ファイル）');
+      } catch (e) {
+        // 失敗しても未保存は解除しない。個別リンクで落とせるように戻す
+        btn.disabled = false;
+        btn.textContent = '⚠ 失敗。もう一度押す（または下の個別ボタン）';
+        window.__logLine('ZIP失敗: ' + e.message);
+      }
+    };
 
     function rebuildDownloads() { if (recEnd) buildDownloads(); }
 
@@ -1052,6 +1227,16 @@
         $('n'+k).textContent = recording ? F.rec.length : F.n;
         const lEl = $('lost'+k); lEl.textContent = F.lost; lEl.className = '';   // 実害の指標ではないので赤くしない
       });
+      // ★③のライブ表示。走る前に見て気づけるように、押す前から出しておく。
+      //   ボタンは無効にしない（押したときに止める）。無効だと「壊れた」と思って触れなくなる。
+      //   収録中はここが表示の持ち主になる（renderMarks と同じ形を保つ）。
+      if (recording) {
+        const isEnd = nextKind() === 'end';
+        const stale = !isEnd && dataStale();
+        $('mark').textContent = isEnd ? '■ 区間 終了'
+                              : (stale ? '▶ 区間 開始（⛔ データが来ていません）' : '▶ 区間 開始');
+        $('mark').className = isEnd ? 'ending' : (stale ? 'stale' : '');
+      }
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
