@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orphe Recorder v1.9 — 走行データ収録（両足・区間マーカー・4条件の進行・一括保存）</title>
+<title>Orphe Recorder v1.10 — 走行データ収録（両足・区間マーカー・4条件の進行・一括保存）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; line-height: 1.6; }
@@ -96,8 +96,8 @@
 </style>
 </head>
 <body>
-  <h1>Orphe Recorder v1.9</h1>
-  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。<b>試技Aから音をつくると4条件（無音／自分の音／メトロノーム／凍らせた音）が揃い、順序はアプリが決めて紫を押すだけで切り替わる。</b>全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。<br><b>v1.9：収録が終わったら緑の「全部まとめて保存（ZIP）」を1タップ。保存するまで上に赤い警告が出続け、未保存のまま次を始めようとすると止まる。センサのデータが来ていないと紫は押せない。</b></p>
+  <h1>Orphe Recorder v1.10</h1>
+  <p class="sub">走行データ収録（両足L/R・ビープ同期・区間マーカー・CSV保存）。まず診断4行を確認 → 左右を接続 → 収録 → 走る直前に紫・直後に橙。<b>試技Aから音をつくると4条件（無音／自分の音／メトロノーム／凍らせた音）が揃い、順序はアプリが決めて紫を押すだけで切り替わる。</b>全画面フラッシュ＝開始:緑 / 停止:赤 / 区間開始:紫 / 区間終了:橙。動画は緑に光ったコマに合わせる。<br><b>v1.9〜：収録が終わったら緑の「全部まとめて保存（ZIP）」を1タップ。保存するまで上に赤い警告が出続け、未保存のまま次を始めようとすると止まる。センサのデータが来ていないと紫は押せない。</b></p>
 
   <div id="unsaved"></div>
 
@@ -815,7 +815,21 @@
     }
 
     // CSVに積んだ行から、指定区間の gyro_x を200Hzの等間隔で取り出す
-    function gyroSeries(F, fromTs, toTs) {
+    /* ══════ 位相をどこで計算するか（v1.10で変更） ══════
+       旧：区間を切り出してからヒルベルト変換を掛けていた。
+       新：収録全体に掛けてから、区間に当たるところを取り出す。
+
+       理由：位相は「一周のどこにいるか」で、その瞬間だけを見ても決まらない。
+       前後の波の形があって初めて決まる。区間の頭には「前」が無いので、
+       切ってから掛けると、そこが捏造になる。
+       ⚠️効き目は正直に言って小さい。実測での位相の差は中央値で数度（区間が短いほど大きく、
+       1〜2秒の区間で5〜6°、10秒を超えると2°以下）。直す理由は数字の大きさではなく筋で、
+       試技の頭には本来「前」があった（スタート地点に立っていた時間）のに、
+       切るとそれを捨てて計算が作り話で埋めるから。音の0秒＝紫＝なぞりの起点がそこに当たる。
+       ★これは「音がいきなり始まる」問題の説明ではない。あちらはカウントインが無いという別の話。 */
+
+    /** 収録全体を5ms等間隔にならす。{ t0, val } を返す（t0＝グリッドの先頭のシューズ時刻） */
+    function uniformGyro(F) {
       const ts = [], gx = [];
       const seen = new Map();
       for (const line of F.rec) {
@@ -824,15 +838,28 @@
         const k = seen.get(t) || 0; seen.set(t, k + 1);
         ts.push(t + k * 5); gx.push(+c[4]);       // 5列目が gyro_x
       }
-      const grid = [], val = [];
+      if (ts.length < 2) return null;
+      const val = [];
       let i = 0;
-      for (let x = fromTs; x <= toTs; x += 5) {
+      for (let x = ts[0]; x <= ts[ts.length - 1]; x += 5) {
         while (i < ts.length - 2 && ts[i + 1] < x) i++;
         const span = (ts[i + 1] - ts[i]) || 1;
         const f = (x - ts[i]) / span;
-        grid.push(x); val.push(gx[i] + (gx[i + 1] - gx[i]) * f);
+        val.push(gx[i] + (gx[i + 1] - gx[i]) * f);
       }
-      return val;
+      return { t0: ts[0], val: val };
+    }
+
+    /** 収録全体を解析してから、[fromTs, toTs] に当たるところだけ取り出す */
+    function analyticRange(F, fromTs, toTs, cutoff) {
+      const u = uniformGyro(F);
+      if (!u) throw new Error('サンプルが足りません');
+      const full = Sonify.analytic(u.val, 200, cutoff);
+      const i0 = Math.max(0, Math.round((fromTs - u.t0) / 5));
+      const i1 = Math.min(full.amp.length, Math.round((toTs - u.t0) / 5) + 1);
+      if (i1 - i0 < 2) throw new Error('区間が短すぎます');
+      return { amp: full.amp.slice(i0, i1), phase: full.phase.slice(i0, i1),
+               n: i1 - i0, full_n: full.amp.length };
     }
 
     function makeAudioBuffer(samples) {
@@ -851,11 +878,11 @@
       this.disabled = true; $('soninfo').textContent = '計算中…';
       setTimeout(function () {                      // 画面を先に更新させてから重い処理へ
         try {
-          const gyro = gyroSeries(F, r.from, r.to);
-          const an = Sonify.analytic(gyro, 200, cut);
+          // ★収録全体で解析してから区間を切る（切ってから掛けると先頭の位相が壊れる）
+          const an = analyticRange(F, r.from, r.to, cut);
           // 1周にかかる時間を測ってから逓倍数を決める（初回のみ。以降は固定値を使う）
           const lapsPre = Math.abs(an.phase[an.phase.length - 1] - an.phase[0]) / (2 * Math.PI);
-          const cyclePre = (gyro.length / 200) / Math.max(lapsPre, 1e-9);
+          const cyclePre = (an.n / 200) / Math.max(lapsPre, 1e-9);
           let nUse;
           if (nLocked === null) {
             nUse = Math.max(10, Math.round(TARGET_HZ * cyclePre / 10) * 10);
@@ -866,7 +893,7 @@
           }
           // 平均の回転数から一歩の周期を出す（接地検出を使わずに済む）
           const laps = Math.abs(an.phase[an.phase.length - 1] - an.phase[0]) / (2 * Math.PI);
-          const durS = gyro.length / 200;
+          const durS = an.n / 200;
           const cycleS = +(durS / Math.max(laps, 1e-9)).toFixed(3);
 
           // ★3条件ぶんを一度に作る。すべて同じ区間・同じN・同じ長さから派生させるので、
@@ -881,6 +908,9 @@
           };
           sonMeta = { range_index: r.idx, foot: r.foot, from_sensor_ts: r.from, to_sensor_ts: r.to,
                       cutoff_hz: cut, n_mult: nUse, n_auto: (nUse !== nMult), duration_s: +durS.toFixed(3),
+                      // ★v1.10：位相は収録全体で計算してから区間を切っている（先頭の端点効果を避けるため）。
+                      //   v1.10以前は区間を切ってから掛けていたので、音の先頭0.25秒ほどの位相が信用できない。
+                      phase_scope: 'whole_recording', centered: true,
                       laps: +laps.toFixed(2), cycle_s: cycleS,
                       sample_rate: SON_SR, kinds: ['phase','frozen','metronome'],
                       frozen_method: 'time_reversal',
@@ -1137,7 +1167,7 @@
         } : null,
         sonification: sonSet ? Object.assign({}, sonMeta, {
           output_latency_ms: outputLatencyMs(), looped: $('sonloop').checked }) : null,
-        note: '★条件（v1.8〜）：条件は収録単位ではなく区間単位。ranges[].condition が silent(無音)/phase(自分の音)/metronome(メトロノーム)/frozen(凍らせた音=運動の音の時間反転) のどれか。null は進行係を使わずに録った区間。ranges[].sound_playing は実際に鳴った音で、condition と食い違っていたらその条件の音が用意できていなかった（＝その試技は使えない）。condition_plan.order が事前に決めた順序（ブロック内ランダム化＝1ブロックに全条件を1回ずつ）で、done/range_index が実際にやった記録。ranges[].felt は体感の一言（任意）。★markers[].data_age_ms は、そのマーカーを押した瞬間にセンサの最後のサンプルが何ms前だったか（スマホ時計で測った受信の古さ）。0〜十数msが正常。大きい区間は sensor_ts が古い値で止まっているので切り出しがずれる。null は1足も繋がっていない、−1は1サンプルも届いていない＝その区間は使えない。v1.9からは800msを超えると紫が止まるので、大きい値が残っているのは警告を承知で通した区間。★ranges[].task_error_cm は課題の誤差[cm]（助走なら踏切位置のズレ。＋が奥、−が手前）＝課題変数。拘束式（各歩の歩幅の和＝助走距離）からの外れ＝悪いばらつきに対応する。sonification が3条件共通の音の素性（同じ区間・同じ逓倍数Nから派生させているので条件間で長さ・ケイデンス・音量が揃っている）。 / timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
+        note: '★条件（v1.8〜）：条件は収録単位ではなく区間単位。ranges[].condition が silent(無音)/phase(自分の音)/metronome(メトロノーム)/frozen(凍らせた音=運動の音の時間反転) のどれか。null は進行係を使わずに録った区間。ranges[].sound_playing は実際に鳴った音で、condition と食い違っていたらその条件の音が用意できていなかった（＝その試技は使えない）。condition_plan.order が事前に決めた順序（ブロック内ランダム化＝1ブロックに全条件を1回ずつ）で、done/range_index が実際にやった記録。ranges[].felt は体感の一言（任意）。★markers[].data_age_ms は、そのマーカーを押した瞬間にセンサの最後のサンプルが何ms前だったか（スマホ時計で測った受信の古さ）。0〜十数msが正常。大きい区間は sensor_ts が古い値で止まっているので切り出しがずれる。null は1足も繋がっていない、−1は1サンプルも届いていない＝その区間は使えない。v1.10からは800msを超えると紫が止まるので、大きい値が残っているのは警告を承知で通した区間。★ranges[].task_error_cm は課題の誤差[cm]（助走なら踏切位置のズレ。＋が奥、−が手前）＝課題変数。拘束式（各歩の歩幅の和＝助走距離）からの外れ＝悪いばらつきに対応する。sonification が3条件共通の音の素性（同じ区間・同じ逓倍数Nから派生させているので条件間で長さ・ケイデンス・音量が揃っている）。 / timestamp=シューズ内蔵時計(epoch ms)。★これはスマホの時計とは別物。start/end_beep_epoch_ms と markers[].t_s はスマホの時計、feet.*.start_beep_sensor_ts と markers[].sensor_ts はシューズの時計。CSVを切るときは必ずシューズ側の値を使うこと。acc/gyroは正規化値(解析側で ×16 / ×2000)、quatは生int16(÷32768で正規化)。markers=収録中に手で打った区間マーカー（フラットなイベント列）。ranges=markersを2個ずつ対にして畳んだ解析区間（closed=falseは終了を押さずに停止した区間）。feet.*.battery_pctは標準BLEバッテリーサービスの残量[%]。非対応ならnullで、batteryの3段階(0=少ない/1=普通/2=多い)を見る。★時計に関する値：clock_offset_at_connect_ms=接続時に測った「スマホ時計 - シューズ時計」[ms]、clock_offset_after_rec_ms=収録の直後に測り直した同じ値、clock_drift_during_rec_ms=その差＝収録中に時計が動いた量。stream_lag_ms=最後に届いたサンプルの古さ[ms]＝BLEの転送遅れ（時計が合っていてもゼロにならない）。★t0の選び方：|clock_drift_during_rec_ms| が小さければ(目安50ms以内) t0 = start_beep_epoch_ms - clock_offset_after_rec_ms が最良（BLEの転送遅れ約37msも消える）。ドリフトが大きい・値がnullの場合は t0 = feet.*.start_beep_sensor_ts（データの先頭合わせ）に留めること。',
 
         feet: {
           left:  footMeta(feet.L, startBeepTs.L, endBeepTs.L),
