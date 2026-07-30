@@ -86,12 +86,12 @@ T.plan = T.makePlan(2, true);
 T.planIdx = 0;
 T.markers = [];
 T.recording = true; T.recStart = Date.now();
-T.sonSet = null;                       // まだ音を作っていない状態
+T.sonSet = {};                         // 音は作った（種類は空＝鳴らせない）状態
 const order = T.plan.map(x => x.cond);
 
 T.addMarker();                         // 紫（1本目）
 check('紫で条件が付く', T.markers[0].condition === order[0], T.markers[0].condition);
-check('音が無いので鳴っていない記録', T.markers[0].sound_playing === null);
+check('その条件の音が無いので鳴っていない記録', T.markers[0].sound_playing === null);
 check('紫の時点では進行は進まない', T.planIdx === 0, 'planIdx=' + T.planIdx);
 T.addMarker();                         // 橙（1本目おわり）
 check('橙で1つ進む', T.planIdx === 1, 'planIdx=' + T.planIdx);
@@ -131,7 +131,7 @@ T.recEnd = Date.now();
 const rg = T.pairedRanges();
 check('区間の数', rg.length >= 2, rg.length + '本');
 check('condition が入っている', rg[0].condition === order[0], rg[0].condition);
-check('sound_playing は null（音が無かった）', rg[0].sound_playing === null);
+check('sound_playing は null（その音が無かった）', rg[0].sound_playing === null);
 check('条件が区間ごとに違う', rg[0].condition !== rg[1].condition,
       rg[0].condition + ' / ' + rg[1].condition);
 
@@ -156,7 +156,7 @@ check('silent の sound_playing は null', T.markers[2].sound_playing === null);
 
 // ================= 7. 課題の誤差（踏切位置のズレ） =================
 console.log('\n[ 課題の誤差が数値で残るか ]');
-T.plan = T.makePlan(1, true); T.planIdx = 0; T.markers = []; T.sonSet = null;
+T.plan = T.makePlan(1, true); T.planIdx = 0; T.markers = []; T.sonSet = {};
 T.recording = true; T.recStart = Date.now();
 T.addMarker(); T.addMarker();                 // 1本やって閉じる
 $('taskerr').value = '-7.5';
@@ -181,7 +181,7 @@ check('未入力の試技は null', rr[1].task_error_cm === null, String(rr[1].t
 // 進行係を使っているとき、体感の一言が ranges[] に載っていなかった。
 // 解析側は ranges を見るので、plan にだけ書いていると届かない。
 console.log('\n[ 進行係ありでも ranges に届くか（v1.6の不具合の再発防止） ]');
-T.plan = T.makePlan(1, false); T.planIdx = 0; T.markers = []; T.sonSet = null;
+T.plan = T.makePlan(1, false); T.planIdx = 0; T.markers = []; T.sonSet = {};
 T.recording = true; T.recStart = Date.now();
 T.addMarker(); T.addMarker();
 $('felt').value = '軽かった'; $('felt').oninput.call($('felt'));
@@ -191,6 +191,16 @@ const r8 = T.pairedRanges();
 check('進行係ありでも ranges[].felt が入る', r8[0].felt === '軽かった', JSON.stringify(r8[0].felt));
 check('進行係ありでも ranges[].task_error_cm が入る', r8[0].task_error_cm === 2.5, r8[0].task_error_cm);
 check('plan 側にも残っている（画面表示用）', T.plan[0].felt === '軽かった' && T.plan[0].task_error_cm === 2.5);
+
+// ================= 9. 試技A（音を作るための録り）が条件を食べないか =================
+console.log('\n[ 試技Aが実験の1本目になってしまわないか ]');
+T.plan = T.makePlan(2, true); T.planIdx = 0; T.markers = []; T.sonSet = null;  // 音はまだ無い
+T.recording = true; T.recStart = Date.now();
+const cond0 = T.plan[0].cond;
+T.addMarker(); T.addMarker();          // ← これが「試技A」。音を作るために録るだけ
+check('Aの区間に条件が付いていない', T.markers[0].condition === null, String(T.markers[0].condition));
+check('★Aで進行が進んでいない', T.planIdx === 0, 'planIdx=' + T.planIdx);
+check('1本目の条件がまだ残っている', T.plan[0].done === false && T.plan[0].cond === cond0);
 
 console.log('\n' + (fail === 0 ? '✓ すべて通過' : '✗ ' + fail + ' 件 失敗'));
 if (sandbox.__logs.length) console.log('\n(アプリのログ)\n  ' + sandbox.__logs.join('\n  '));
