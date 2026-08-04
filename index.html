@@ -147,6 +147,10 @@
       <input type="text" id="felt" placeholder="直前の試技の一言（任意）" autocomplete="off">
       <input type="number" id="taskerr" step="0.5" placeholder="課題の誤差 cm（例 踏切 +3 / −7）" autocomplete="off">
     </div>
+    <div class="row2">
+      <input type="number" id="steps" step="1" min="1" placeholder="★歩数（助走の接地回数）" autocomplete="off">
+      <input type="text" id="startnote" placeholder="開始の様子（仕切り直した／浮かせ損ねた 等）" autocomplete="off">
+    </div>
     <div id="marks">マーカーなし</div>
   </div>
 
@@ -683,7 +687,7 @@
         }
         mk.sound_playing = played;                 // 実際に鳴った音（鳴らなければ null）
         // 一言の入力欄は次の試技に入った時点でクリアする（前の試技のぶんは plan 側に残っている）
-        $('felt').value = ''; $('taskerr').value = ''; feltTarget = null;
+        $('felt').value = ''; $('taskerr').value = ''; $('steps').value = ''; $('startnote').value = ''; feltTarget = null;
       } else {
         stopSound();
         const a = markers[markers.length - 2];
@@ -733,6 +737,12 @@
       const n = parseFloat(this.value);
       writeBack('task_error_cm', Number.isFinite(n) ? n : null);
     };
+    // ★構造モード用（2026-08-03）：歩数と開始の様子を区間に残す
+    $('steps').oninput = function () {
+      const n = parseInt(this.value, 10);
+      writeBack('steps', Number.isFinite(n) ? n : null);
+    };
+    $('startnote').oninput = function () { writeBack('start_note', this.value.trim()); };
 
     // 対になったマーカーだけを区間に畳む（末尾が開きっぱなしなら収録終了で閉じる）
     function pairedRanges() {
@@ -747,6 +757,8 @@
           condition: a.condition || null,         // ★解析はこれで条件を割る（silent/phase/metronome/frozen）
           sound_playing: a.sound_playing || null, // 実際に鳴った音。conditionと食い違っていたら音が用意できていなかった
           felt: a.felt || null,                   // 体感の一言（任意）
+          steps: (a.steps === undefined ? null : a.steps),           // ★歩数（助走の接地回数・2026-08-03）
+          start_note: a.start_note || null,                          // ★開始の様子（仕切り直した等）
           task_error_cm: (a.task_error_cm === undefined ? null : a.task_error_cm), // ★課題の誤差（踏切位置のズレ等）
           start_epoch_ms: a.epoch_ms,
           end_epoch_ms: b ? b.epoch_ms : recEnd
@@ -800,6 +812,24 @@
       return out;
     }
 
+    /* ══════ 構造モード（2026-08-03 追加）══════
+       URLに ?structure を付けると、音づくり・条件の進行を隠す。
+       付けなければ従来どおり（既存の動作は一切変わらない）。
+       例: https://osarasara.github.io/orphe-recorder/?structure
+       目的：2026-08-05前後の「構造を取る回」用。音の条件は回さない。      */
+    /* typeof で守る：tools/test_plan_logic.js は vm 上でこのスクリプトを走らせるので
+       location / document / addEventListener が無い。ブラウザでの挙動は変わらない。 */
+    const STRUCTURE_MODE =
+      (typeof location !== 'undefined') && /(\?|&)structure(=|&|$)/.test(location.search);
+    if (STRUCTURE_MODE && typeof addEventListener === 'function') {
+      addEventListener('DOMContentLoaded', function () {
+        const pb = document.getElementById('planbar'); if (pb) pb.style.display = 'none';
+        const sb = document.getElementById('sonbar');  if (sb) sb.style.display = 'none';
+        const h  = document.querySelector('h1');
+        if (h) h.innerHTML += ' <span style="font-size:.7em;color:#7c3aed">🔬 構造モード</span>';
+      });
+    }
+
     function fillRangeSelect() {
       const sel = $('sonrange'), rs = rangesForSound();
       sel.innerHTML = '';
@@ -810,7 +840,7 @@
         sel.appendChild(o);
       });
       $('songen').disabled = rs.length === 0;
-      $('sonbar').style.display = rs.length ? 'block' : 'none';
+      $('sonbar').style.display = (STRUCTURE_MODE || !rs.length) ? 'none' : 'block';
       if (!rs.length) $('soninfo').textContent = '区間マーカーが無いので作れません';
     }
 
@@ -1006,6 +1036,7 @@
       $('downloads').innerHTML = ''; $('summary').style.display = 'none';
       $('zipwrap').style.display = 'none';
       markers = []; feltTarget = null; $('felt').value = ''; $('taskerr').value = '';
+      $('steps').value = ''; $('startnote').value = '';
       $('mark').disabled = false; renderMarks(); renderPlan();
       // display は 'block' を明示する。'' だと CSS の #markbar{display:none} が生き残る
       $('markbar').style.display = 'block';
